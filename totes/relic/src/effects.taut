@@ -1,0 +1,32 @@
+import "../../http/src/http.taut" { HttpRequest }
+import "response.taut" { Response, prepend_headers }
+
+// What a handler asks of the request. `handler` from `router!` answers all
+// three with `answer_request`, around the middleware and the handler.
+// `request_body` gives the body as `Bytes`, made from the request's body text
+// each time it is asked.
+// `get_headers` reads one request header (the first, when the request has several of that
+// name). `set_header` adds a response header; a `content-length`, a `transfer-encoding`
+// or (in `finish_response`) a `connection` set this way is dropped when the response is
+// written (`response.taut`): relic decides how the body is framed and whether the
+// connection stays open.
+pub effect get_headers(name: Text): Option(Text) resume 1
+pub effect set_header(name: Text, value: Text): Unit resume 1
+pub effect request_body(): Bytes resume 1
+
+// `k` answers `request`; the headers it sets go before the ones its response has.
+pub fn answer_request<!e>(
+  request: HttpRequest,
+  k: () -> Response ! {get_headers, set_header, request_body} ∪ e
+): Response ! e {
+  var added := Nil
+  let out := handle { k() } with {
+    get_headers(name), cont => cont(HttpRequest::header(request, name))
+    set_header(name, value), cont => {
+      added := Cons(#(@name name, @value value), added)
+      cont(#())
+    }
+    request_body(), cont => cont(Bytes::of_text(HttpRequest::body(request)))
+  }
+  prepend_headers(out, added)
+}

@@ -1,0 +1,22 @@
+import "../../http/src/http.taut" { HttpRequest }
+import "../../http/src/status.taut" { Status }
+import "../../http/src/wire.taut" { parse_request }
+import "response.taut" { Response, is_head, response_text, text_response }
+
+// One request in text, the response in text. A request that does not parse is
+// 400. A body that is not UTF-8 has no text form (`response_text` is empty);
+// the socket path writes those bytes unchanged.
+pub fn render<R, !e>(
+  raw: Text,
+  pick: (&HttpRequest) -> R,
+  answer: (HttpRequest, R) -> Response ! e
+): Text ! e {
+  match parse_request(raw) {
+    None => response_text(false, text_response(Status::bad_request(), "malformed request"))
+    Some(r) => {
+      let head := is_head(r)
+      let route := pick(&r)
+      response_text(head, answer(r, route))
+    }
+  }
+}

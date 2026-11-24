@@ -1,0 +1,1578 @@
+import std::base { List }
+import std::bytes { Bytes, Text }
+import std::uint { UInt }
+import std::list { List }
+import std::nat { Nat }
+import std::text { Text, utf8_valid }
+import "bytes.taut" {
+  byte_list_eq,
+  cons_fst,
+  cons_some,
+  strip_cr,
+  strip_cr_cons,
+  strip_cr_last,
+  strip_prefix,
+  take_until,
+  unlines
+}
+import "http.taut" { HttpRequest, Method }
+import "wire.taut" {
+  Header,
+  Query,
+  Start,
+  blank_tail,
+  build_request,
+  cons_headers,
+  is_blank,
+  parse_header,
+  parse_headers,
+  parse_lines,
+  parse_start,
+  start_of,
+  version_tail
+}
+import "frame.taut" { Head, Span, between, between_same, span_vals, spans_vals }
+
+// Reading the lines of a head where they are: each line is a `Span` of the
+// received bytes, and these functions read it with `Bytes::get`, as the list
+// functions of `wire.taut` read `span_vals` of it.
+
+fn vals(l: List(UInt(8))): List(Nat) {
+  List::map((y: UInt(8)) => UInt::val8(y), l)
+}
+
+// The front of `between`: the item at `s`, when `s` is before `e` and there is one.
+pub theorem between_front<A: Type>(
+  l: List(A),
+  s: Nat,
+  e: Nat
+): between(l, s, e) = (⊢ List(A) from match s < e {
+  false => Nil
+  true => ⊢ List(A) from match List::nth(l, s) {
+    None => Nil
+    Some(x) => Cons(x, between(l, Succ(s), e))
+  }
+}) {
+  ⊢ between(l, s, e) = (⊢ List(A) from match s < e {
+    false => Nil
+    true => ⊢ List(A) from match List::nth(l, s) {
+      None => Nil
+      Some(x) => Cons(x, between(l, Succ(s), e))
+    }
+  }) from match l {
+    Nil => ⊢ Eq(List(A), List::Nil(<A: A>), ⊢ List(A) from match s < e {
+      false => Nil
+      true => Nil
+    }) from match s < e eqn e2 {
+      false => Refl
+      true => Refl
+    }
+    Cons(h, t) => ⊢ between(Cons(h, t), s, e) = (⊢ List(A) from match s < e {
+      false => Nil
+      true => ⊢ List(A) from match List::nth(Cons(h, t), s) {
+        None => Nil
+        Some(x) => Cons(x, between(Cons(h, t), Succ(s), e))
+      }
+    }) from match e {
+      Zero => Refl
+      Succ(e2) => ⊢ between(Cons(h, t), s, Succ(e2)) = (⊢ List(A) from match s < Succ(e2) {
+        false => Nil
+        true => ⊢ List(A) from match List::nth(Cons(h, t), s) {
+          None => Nil
+          Some(x) => Cons(x, between(Cons(h, t), Succ(s), Succ(e2)))
+        }
+      }) from match s {
+        Zero => Refl
+        Succ(s2) => between_front(t, s2, e2)
+      }
+    }
+  }
+}
+
+pub theorem opt_cases<A: Type>(
+  P: (Option(A)) -> Prop,
+  o: Option(A),
+  a: (o = None) -> P(None),
+  b: (x: A) -> (o = Some(x)) -> P(Some(x))
+): P(o) {
+  match o {
+    None => a(Refl)
+    Some(x) => b(x, Refl)
+  }
+}
+
+pub theorem front_some<A: Type>(
+  l: List(A),
+  s: Nat,
+  e: Nat,
+  x: A,
+  h1: (s < e) = true,
+  h2: List::nth(l, s) = Some(x)
+): between(l, s, e) = Cons(x, between(l, Succ(s), e)) {
+  Eq::trans(
+    between_front(l, s, e),
+    Eq::trans(
+      Eq::congr(
+        (c: Bool) => (⊢ List(A) from match c {
+          false => Nil
+          true => ⊢ List(A) from match List::nth(l, s) {
+            None => Nil
+            Some(y) => Cons(y, between(l, Succ(s), e))
+          }
+        }),
+        h1
+      ),
+      Eq::congr(
+        (o: Option(A)) => (⊢ List(A) from match o {
+          None => Nil
+          Some(y) => Cons(y, between(l, Succ(s), e))
+        }),
+        h2
+      )
+    )
+  )
+}
+
+pub theorem front_past<A: Type>(
+  l: List(A),
+  s: Nat,
+  e: Nat,
+  h1: (s < e) = false
+): between(l, s, e) = Nil {
+  Eq::trans(
+    between_front(l, s, e),
+    Eq::congr(
+      (c: Bool) => (⊢ List(A) from match c {
+        false => Nil
+        true => ⊢ List(A) from match List::nth(l, s) {
+          None => Nil
+          Some(y) => Cons(y, between(l, Succ(s), e))
+        }
+      }),
+      h1
+    )
+  )
+}
+
+pub theorem front_none<A: Type>(
+  l: List(A),
+  s: Nat,
+  e: Nat,
+  h1: (s < e) = true,
+  h2: List::nth(l, s) = None
+): between(l, s, e) = Nil {
+  Eq::trans(
+    between_front(l, s, e),
+    Eq::trans(
+      Eq::congr(
+        (c: Bool) => (⊢ List(A) from match c {
+          false => Nil
+          true => ⊢ List(A) from match List::nth(l, s) {
+            None => Nil
+            Some(y) => Cons(y, between(l, Succ(s), e))
+          }
+        }),
+        h1
+      ),
+      Eq::congr(
+        (o: Option(A)) => (⊢ List(A) from match o {
+          None => Nil
+          Some(y) => Cons(y, between(l, Succ(s), e))
+        }),
+        h2
+      )
+    )
+  )
+}
+
+pub theorem lt_succ_self(i: Nat): (i < Succ(i)) = true {
+  match i {
+    Zero => Refl
+    Succ(j) => lt_succ_self(j)
+  }
+}
+
+pub theorem lt_succ_of(p: Nat, j: Nat, h: (p < j) = true): (p < Succ(j)) = true {
+  match p {
+    Zero => Refl
+    Succ(p2) => ⊢ (Succ(p2) < Succ(j)) = true from match j {
+      Zero => False::elim(false_ne_true(h))
+      Succ(j2) => lt_succ_of(p2, j2, h)
+    }
+  }
+}
+
+pub theorem not_lt_of_le(e: Nat, i: Nat, h: (e <= i) = true): (i < e) = false {
+  match e {
+    Zero => Refl
+    Succ(e2) => ⊢ (i < Succ(e2)) = false from match i {
+      Zero => False::elim(false_ne_true(h))
+      Succ(i2) => not_lt_of_le(e2, i2, h)
+    }
+  }
+}
+
+// The first index from `i` before `e` whose byte is `c`; `e` when there is none.
+pub fn until_at(b: Bytes, c: Nat, i: Nat, e: Nat, k: Nat): Nat {
+  Bytes::find_within(b, c, i, e, k)
+}
+
+// What `until_at` finds is past any `p` before both `e` and where it starts.
+pub theorem until_past(
+  l: List(UInt(8)),
+  c: Nat,
+  p: Nat,
+  i: Nat,
+  e: Nat,
+  k: Nat,
+  hp: (p < e) = true,
+  hi: (p < i) = true
+): (p < until_at(Bytes::Mk(l), c, i, e, k)) = true {
+  match k {
+    Zero => hp
+    Succ(k2) => ⊢ Eq(Bool, p < (⊢ Nat from match i < e {
+      false => e
+      true => ⊢ Nat from match List::nth(l, i) {
+        None => e
+        Some(x) => ⊢ Nat from match Nat::eq(UInt::val8(x), c) {
+          true => i
+          false => until_at(Bytes::Mk(l), c, Succ(i), e, k2)
+        }
+      }
+    }), true) from match i < e eqn ye {
+      false => hp
+      true => opt_cases(
+        (o: Option(UInt(8))) => Eq(Bool, p < (⊢ Nat from match o {
+          None => e
+          Some(x) => ⊢ Nat from match Nat::eq(UInt::val8(x), c) {
+            true => i
+            false => until_at(Bytes::Mk(l), c, Succ(i), e, k2)
+          }
+        }), true),
+        List::nth(l, i),
+        (oe: List::nth(l, i) = None) => hp,
+        (x: UInt(8)) => (oe: List::nth(l, i) = Some(x)) => ⊢ Eq(Bool, p < (⊢ Nat from match Nat::eq(UInt::val8(x), c) {
+          true => i
+          false => until_at(Bytes::Mk(l), c, Succ(i), e, k2)
+        }), true) from match Nat::eq(UInt::val8(x), c) eqn ze {
+          false => until_past(l, c, p, Succ(i), e, k2, hp, lt_succ_of(p, i, hi))
+          true => hi
+        }
+      )
+    }
+  }
+}
+
+pub theorem until_empty(
+  l: List(UInt(8)),
+  c: Nat,
+  i: Nat,
+  e: Nat,
+  h: between(l, i, e) = Nil
+): take_until(
+  c,
+  vals(between(l, i, e))
+) = #(@before vals(between(l, i, e)), @after vals(between(l, e, e))) {
+  Eq::trans(
+    Eq::congr(⟦take_until(c, vals(□))⟧, h),
+    Eq::sym(
+      Eq::trans(
+        Eq::congr(
+          ⟦the(
+            @before List(Nat) × @after List(Nat),
+            #(@before vals(□), @after vals(between(l, e, e)))
+          )⟧,
+          h
+        ),
+        Eq::congr(
+          ⟦the(
+            @before List(Nat) × @after List(Nat),
+            #(@before List::Nil(<A: Nat>), @after vals(□))
+          )⟧,
+          between_same(l, e)
+        )
+      )
+    )
+  )
+}
+
+// `take_until` on the bytes of a span is cutting the span where `until_at` says.
+pub theorem until_eq(
+  l: List(UInt(8)),
+  c: Nat,
+  i: Nat,
+  e: Nat,
+  k: Nat,
+  hk: (e <= i + k) = true
+): take_until(
+  c,
+  vals(between(l, i, e))
+) = #(
+  @before vals(between(l, i, until_at(Bytes::Mk(l), c, i, e, k))),
+  @after vals(between(l, until_at(Bytes::Mk(l), c, i, e, k), e))
+) {
+  ⊢ take_until(
+    c,
+    vals(between(l, i, e))
+  ) = #(
+    @before vals(between(l, i, until_at(Bytes::Mk(l), c, i, e, k))),
+    @after vals(between(l, until_at(Bytes::Mk(l), c, i, e, k), e))
+  ) from match k {
+    Zero => until_empty(l, c, i, e, front_past(l, i, e, not_lt_of_le(e, i, hk)))
+    Succ(k2) => ⊢ Eq(
+        @before List(Nat) × @after List(Nat),
+        take_until(c, vals(between(l, i, e))),
+        #(
+          @before vals(between(l, i, ⊢ Nat from match i < e {
+            false => e
+            true => ⊢ Nat from match List::nth(l, i) {
+              None => e
+              Some(x) => ⊢ Nat from match Nat::eq(UInt::val8(x), c) {
+                true => i
+                false => until_at(Bytes::Mk(l), c, Succ(i), e, k2)
+              }
+            }
+          })),
+          @after vals(between(l, ⊢ Nat from match i < e {
+            false => e
+            true => ⊢ Nat from match List::nth(l, i) {
+              None => e
+              Some(x) => ⊢ Nat from match Nat::eq(UInt::val8(x), c) {
+                true => i
+                false => until_at(Bytes::Mk(l), c, Succ(i), e, k2)
+              }
+            }
+          }, e))
+        )
+      ) from match i < e eqn ye {
+      false => until_empty(l, c, i, e, front_past(l, i, e, ye))
+      true => opt_cases(
+        (o: Option(UInt(8))) => Eq(
+          @before List(Nat) × @after List(Nat),
+          take_until(c, vals(between(l, i, e))),
+          #(
+            @before vals(between(l, i, ⊢ Nat from match o {
+              None => e
+              Some(x) => ⊢ Nat from match Nat::eq(UInt::val8(x), c) {
+                true => i
+                false => until_at(Bytes::Mk(l), c, Succ(i), e, k2)
+              }
+            })),
+            @after vals(between(l, ⊢ Nat from match o {
+              None => e
+              Some(x) => ⊢ Nat from match Nat::eq(UInt::val8(x), c) {
+                true => i
+                false => until_at(Bytes::Mk(l), c, Succ(i), e, k2)
+              }
+            }, e))
+          )
+        ),
+        List::nth(l, i),
+        (oe: List::nth(l, i) = None) => until_empty(l, c, i, e, front_none(l, i, e, ye, oe)),
+        (x: UInt(8)) => (oe: List::nth(l, i) = Some(x)) => ⊢ Eq(
+            @before List(Nat) × @after List(Nat),
+            take_until(c, vals(between(l, i, e))),
+            #(
+              @before vals(between(l, i, ⊢ Nat from match Nat::eq(UInt::val8(x), c) {
+                true => i
+                false => until_at(Bytes::Mk(l), c, Succ(i), e, k2)
+              })),
+              @after vals(between(l, ⊢ Nat from match Nat::eq(UInt::val8(x), c) {
+                true => i
+                false => until_at(Bytes::Mk(l), c, Succ(i), e, k2)
+              }, e))
+            )
+          ) from match Nat::eq(UInt::val8(x), c) eqn ze {
+  false => Eq::trans(
+            Eq::congr(⟦take_until(c, vals(□))⟧, front_some(l, i, e, x, ye, oe)),
+            Eq::trans(
+              Eq::congr(
+                (w: Bool) => (⊢ @before List(Nat) × @after List(Nat) from match w {
+                  true => #(@before List::Nil(<A: Nat>), @after Cons(UInt::val8(x), vals(between(l, Succ(i), e))))
+                  false => cons_fst(UInt::val8(x), take_until(c, vals(between(l, Succ(i), e))))
+                }),
+                ze
+              ),
+              Eq::trans(
+                Eq::congr(
+                  ⟦cons_fst(UInt::val8(x), □)⟧,
+                  until_eq(l, c, Succ(i), e, k2, Eq::trans(Eq::congr(⟦e <= □⟧, Nat::add_succ_left(i, k2)), hk))
+                ),
+                Eq::sym(
+                  Eq::congr(
+                    ⟦the(
+                      @before List(Nat) × @after List(Nat),
+                      #(@before vals(□), @after vals(between(l, until_at(Bytes::Mk(l), c, Succ(i), e, k2), e)))
+                    )⟧,
+                    front_some(
+                      l,
+                      i,
+                      until_at(Bytes::Mk(l), c, Succ(i), e, k2),
+                      x,
+                      until_past(l, c, i, Succ(i), e, k2, ye, lt_succ_self(i)),
+                      oe
+                    )
+                  )
+                )
+              )
+            )
+          )
+  true => Eq::trans(
+            Eq::trans(
+              Eq::congr(⟦take_until(c, vals(□))⟧, front_some(l, i, e, x, ye, oe)),
+              Eq::congr(
+                (w: Bool) => (⊢ @before List(Nat) × @after List(Nat) from match w {
+                  true => #(@before List::Nil(<A: Nat>), @after Cons(UInt::val8(x), vals(between(l, Succ(i), e))))
+                  false => cons_fst(UInt::val8(x), take_until(c, vals(between(l, Succ(i), e))))
+                }),
+                ze
+              )
+            ),
+            Eq::sym(
+              Eq::trans(
+                Eq::congr(
+                  ⟦the(@before List(Nat) × @after List(Nat), #(@before vals(□), @after vals(between(l, i, e))))⟧,
+                  between_same(l, i)
+                ),
+                Eq::congr(
+                  ⟦the(@before List(Nat) × @after List(Nat), #(@before List::Nil(<A: Nat>), @after vals(□)))⟧,
+                  front_some(l, i, e, x, ye, oe)
+                )
+              )
+            )
+          )
+}
+      )
+    }
+  }
+}
+
+// ---- ": " after the name -------------------------------------------------------------
+
+pub fn opt_rest(l: List(UInt(8)), o: Option(Nat), e: Nat): Option(List(Nat)) {
+  match o {
+    None => None
+    Some(v) => Some(vals(between(l, v, e)))
+  }
+}
+
+pub fn pre_sp(z: Bool, u: Nat): Option(Nat) {
+  match z {
+    false => None
+    true => Some(Succ(Succ(u)))
+  }
+}
+
+pub fn pre_get2(o: Option(UInt(8)), u: Nat): Option(Nat) {
+  match o {
+    None => None
+    Some(x) => pre_sp(Nat::eq(32, UInt::val8(x)), u)
+  }
+}
+
+pub fn pre_lt2(y: Bool, b: Bytes, u: Nat): Option(Nat) {
+  match y {
+    false => None
+    true => pre_get2(Bytes::get(b, Succ(u)), u)
+  }
+}
+
+pub fn pre_colon(z: Bool, b: Bytes, u: Nat, e: Nat): Option(Nat) {
+  match z {
+    false => None
+    true => pre_lt2(Succ(u) < e, b, u)
+  }
+}
+
+pub fn pre_get(o: Option(UInt(8)), b: Bytes, u: Nat, e: Nat): Option(Nat) {
+  match o {
+    None => None
+    Some(x) => pre_colon(Nat::eq(58, UInt::val8(x)), b, u, e)
+  }
+}
+
+pub fn pre_lt(y: Bool, b: Bytes, u: Nat, e: Nat): Option(Nat) {
+  match y {
+    false => None
+    true => pre_get(Bytes::get(b, u), b, u, e)
+  }
+}
+
+// Where the value starts when the span from `u` starts with ": ".
+pub fn pre_at(b: Bytes, u: Nat, e: Nat): Option(Nat) {
+  pre_lt(u < e, b, u, e)
+}
+
+pub theorem pre_eq(
+  l: List(UInt(8)),
+  u: Nat,
+  e: Nat
+): strip_prefix(
+  Cons(58, Cons(32, Nil)),
+  vals(between(l, u, e))
+) = opt_rest(l, pre_at(Bytes::Mk(l), u, e), e) {
+  ⊢ Eq(
+    Option(List(Nat)),
+    strip_prefix(Cons(58, Cons(32, Nil)), vals(between(l, u, e))),
+    opt_rest(l, pre_lt((u < e), Bytes::Mk(l), u, e), e)
+  ) from match u < e eqn ye {
+    false => Eq::congr(⟦strip_prefix(Cons(58, Cons(32, Nil)), vals(□))⟧, front_past(l, u, e, ye))
+    true => opt_cases(
+      (o: Option(UInt(8))) => Eq(
+        Option(List(Nat)),
+        strip_prefix(Cons(58, Cons(32, Nil)), vals(between(l, u, e))),
+        opt_rest(l, pre_get(o, Bytes::Mk(l), u, e), e)
+      ),
+      List::nth(l, u),
+      (oe: List::nth(l, u) = None) => Eq::congr(
+        ⟦strip_prefix(Cons(58, Cons(32, Nil)), vals(□))⟧,
+        front_none(l, u, e, ye, oe)
+      ),
+      (x: UInt(8)) => (oe: List::nth(l, u) = Some(x)) => Eq::trans(
+        Eq::congr(⟦strip_prefix(Cons(58, Cons(32, Nil)), vals(□))⟧, front_some(l, u, e, x, ye, oe)),
+        ⊢ Eq(
+            Option(List(Nat)),
+            ⊢ Option(List(Nat)) from match Nat::eq(58, UInt::val8(x)) {
+              true => strip_prefix(Cons(32, Nil), vals(between(l, Succ(u), e)))
+              false => None
+            },
+            opt_rest(l, pre_colon((Nat::eq(58, UInt::val8(x))), Bytes::Mk(l), u, e), e)
+          ) from match Nat::eq(58, UInt::val8(x)) eqn ze {
+  false => Refl
+  true => ⊢ Eq(
+              Option(List(Nat)),
+              strip_prefix(Cons(32, Nil), vals(between(l, Succ(u), e))),
+              opt_rest(l, pre_lt2((Succ(u) < e), Bytes::Mk(l), u), e)
+            ) from match Succ(u) < e eqn ye2 {
+  false => Eq::congr(
+              ⟦strip_prefix(Cons(32, Nil), vals(□))⟧,
+              front_past(l, Succ(u), e, ye2)
+            )
+  true => opt_cases(
+              (o2: Option(UInt(8))) => Eq(
+                Option(List(Nat)),
+                strip_prefix(Cons(32, Nil), vals(between(l, Succ(u), e))),
+                opt_rest(l, pre_get2(o2, u), e)
+              ),
+              List::nth(l, Succ(u)),
+              (oe2: List::nth(l, Succ(u)) = None) => Eq::congr(
+                ⟦strip_prefix(Cons(32, Nil), vals(□))⟧,
+                front_none(l, Succ(u), e, ye2, oe2)
+              ),
+              (w: UInt(8)) => (oe2: List::nth(l, Succ(u)) = Some(w)) => Eq::trans(
+                Eq::congr(⟦strip_prefix(Cons(32, Nil), vals(□))⟧, front_some(l, Succ(u), e, w, ye2, oe2)),
+                ⊢ Eq(
+                    Option(List(Nat)),
+                    ⊢ Option(List(Nat)) from match Nat::eq(32, UInt::val8(w)) {
+                      true => strip_prefix(List::Nil(<A: Nat>), vals(between(l, Succ(Succ(u)), e)))
+                      false => None
+                    },
+                    opt_rest(l, pre_sp((Nat::eq(32, UInt::val8(w))), u), e)
+                  ) from match Nat::eq(32, UInt::val8(w)) eqn qe {
+  false => Refl
+  true => Refl
+}
+              )
+            )
+}
+}
+      )
+    )
+  }
+}
+
+// ---- the carriage return at the end ---------------------------------------------------
+
+pub fn cr_last(z: Bool, j: Nat): Option(Nat) {
+  match z {
+    true => Some(j)
+    false => None
+  }
+}
+
+// Where the span from `j` up to `e` ends without its last byte, when that byte
+// is a carriage return.
+pub fn cr_at(b: Bytes, j: Nat, e: Nat, k: Nat): Option(Nat) {
+  match k {
+    Zero => None
+    Succ(k2) => ⊢ Option(Nat) from match j < e {
+      false => None
+      true => ⊢ Option(Nat) from match Bytes::get(b, j) {
+        None => None
+        Some(x) => ⊢ Option(Nat) from match Succ(j) < e {
+          false => cr_last(Nat::eq(UInt::val8(x), 13), j)
+          true => ⊢ Option(Nat) from match Bytes::get(b, Succ(j)) {
+            None => cr_last(Nat::eq(UInt::val8(x), 13), j)
+            Some(w) => cr_at(b, Succ(j), e, k2)
+          }
+        }
+      }
+    }
+  }
+}
+
+// The steps of `cr_at`, as their own functions.
+pub fn cr_get2(o: Option(UInt(8)), x: UInt(8), b: Bytes, j: Nat, e: Nat, k: Nat): Option(Nat) {
+  match o {
+    None => cr_last(Nat::eq(UInt::val8(x), 13), j)
+    Some(w) => cr_at(b, Succ(j), e, k)
+  }
+}
+
+pub fn cr_lt2(y: Bool, x: UInt(8), b: Bytes, j: Nat, e: Nat, k: Nat): Option(Nat) {
+  match y {
+    false => cr_last(Nat::eq(UInt::val8(x), 13), j)
+    true => cr_get2(Bytes::get(b, Succ(j)), x, b, j, e, k)
+  }
+}
+
+pub fn cr_get(o: Option(UInt(8)), b: Bytes, j: Nat, e: Nat, k: Nat): Option(Nat) {
+  match o {
+    None => None
+    Some(x) => cr_lt2(Succ(j) < e, x, b, j, e, k)
+  }
+}
+
+pub fn cr_lt(y: Bool, b: Bytes, j: Nat, e: Nat, k: Nat): Option(Nat) {
+  match y {
+    false => None
+    true => cr_get(Bytes::get(b, j), b, j, e, k)
+  }
+}
+
+pub fn opt_gt(p: Nat, o: Option(Nat)): Bool {
+  match o {
+    None => true
+    Some(e2) => p < e2
+  }
+}
+
+pub theorem cr_last_gt(
+  p: Nat,
+  j: Nat,
+  z: Bool,
+  hp: (p < j) = true
+): opt_gt(p, cr_last(z, j)) = true {
+  match z { true => hp, false => Refl }
+}
+
+// Where `cr_at` ends a span is past any `p` before where it starts.
+pub theorem cr_gt(
+  l: List(UInt(8)),
+  p: Nat,
+  j: Nat,
+  e: Nat,
+  k: Nat,
+  hp: (p < j) = true
+): opt_gt(p, cr_at(Bytes::Mk(l), j, e, k)) = true {
+  match k {
+    Zero => Refl
+    Succ(k2) => ⊢ Eq(
+      Bool,
+      opt_gt(p, cr_lt((j < e), Bytes::Mk(l), j, e, k2)),
+      true
+    ) from match j < e eqn ye {
+      false => Refl
+      true => opt_cases(
+        (o: Option(UInt(8))) => Eq(Bool, opt_gt(p, cr_get(o, Bytes::Mk(l), j, e, k2)), true),
+        List::nth(l, j),
+        (oe: List::nth(l, j) = None) => Refl,
+        (x: UInt(8)) => (oe: List::nth(l, j) = Some(x)) => ⊢ Eq(Bool, opt_gt(p, cr_lt2((Succ(j) < e), x, Bytes::Mk(l), j, e, k2)), true) from match Succ(j) < e eqn ye2 {
+  false => cr_last_gt(p, j, Nat::eq(UInt::val8(x), 13), hp)
+  true => opt_cases(
+            (o2: Option(UInt(8))) => Eq(
+              Bool,
+              opt_gt(p, cr_get2(o2, x, Bytes::Mk(l), j, e, k2)),
+              true
+            ),
+            List::nth(l, Succ(j)),
+            (oe2: List::nth(l, Succ(j)) = None) => cr_last_gt(p, j, Nat::eq(UInt::val8(x), 13), hp),
+            (w: UInt(8)) => (oe2: List::nth(l, Succ(j)) = Some(w)) => cr_gt(
+              l,
+              p,
+              Succ(j),
+              e,
+              k2,
+              lt_succ_of(p, j, hp)
+            )
+          )
+}
+      )
+    }
+  }
+}
+
+pub fn opt_init(l: List(UInt(8)), j: Nat, o: Option(Nat)): Option(List(Nat)) {
+  match o {
+    None => None
+    Some(e2) => Some(vals(between(l, j, e2)))
+  }
+}
+
+pub theorem cons_init(
+  l: List(UInt(8)),
+  j: Nat,
+  x: UInt(8),
+  o: Option(Nat),
+  oe: List::nth(l, j) = Some(x),
+  hg: opt_gt(j, o) = true
+): cons_some(UInt::val8(x), opt_init(l, Succ(j), o)) = opt_init(l, j, o) {
+  match o {
+    None => Refl
+    Some(e2) => Eq::sym(
+      Eq::congr(⟦the(Option(List(Nat)), Some(vals(□)))⟧, front_some(l, j, e2, x, hg, oe))
+    )
+  }
+}
+
+// The last byte of the span, when the span ends there.
+pub theorem cr_end(
+  l: List(UInt(8)),
+  j: Nat,
+  x: UInt(8),
+  r: List(Nat),
+  hr: r = Nil
+): strip_cr_cons(
+  UInt::val8(x),
+  r,
+  strip_cr(r)
+) = opt_init(l, j, cr_last(Nat::eq(UInt::val8(x), 13), j)) {
+  Eq::trans(
+    Eq::congr((t: List(Nat)) => strip_cr_cons(UInt::val8(x), t, strip_cr(t)), hr),
+    ⊢ Eq(Option(List(Nat)), strip_cr_last((Nat::eq(UInt::val8(x), 13))), opt_init(l, j, cr_last((Nat::eq(UInt::val8(x), 13)), j))) from match Nat::eq(UInt::val8(x), 13) eqn ze {
+  false => Refl
+  true => Eq::sym(
+        Eq::congr(⟦the(Option(List(Nat)), Some(vals(□)))⟧, between_same(l, j))
+      )
+}
+  )
+}
+
+// `strip_cr` on the bytes of a span is ending the span where `cr_at` says.
+pub theorem cr_eq(
+  l: List(UInt(8)),
+  j: Nat,
+  e: Nat,
+  k: Nat,
+  hk: (e <= j + k) = true
+): strip_cr(vals(between(l, j, e))) = opt_init(l, j, cr_at(Bytes::Mk(l), j, e, k)) {
+  match k {
+    Zero => Eq::congr(⟦strip_cr(vals(□))⟧, front_past(l, j, e, not_lt_of_le(e, j, hk)))
+    Succ(k2) => ⊢ Eq(
+      Option(List(Nat)),
+      strip_cr(vals(between(l, j, e))),
+      opt_init(l, j, cr_lt((j < e), Bytes::Mk(l), j, e, k2))
+    ) from match j < e eqn ye {
+      false => Eq::congr(⟦strip_cr(vals(□))⟧, front_past(l, j, e, ye))
+      true => opt_cases(
+        (o: Option(UInt(8))) => Eq(
+          Option(List(Nat)),
+          strip_cr(vals(between(l, j, e))),
+          opt_init(l, j, cr_get(o, Bytes::Mk(l), j, e, k2))
+        ),
+        List::nth(l, j),
+        (oe: List::nth(l, j) = None) => Eq::congr(⟦strip_cr(vals(□))⟧, front_none(l, j, e, ye, oe)),
+        (x: UInt(8)) => (oe: List::nth(l, j) = Some(x)) => Eq::trans(
+          Eq::congr(⟦strip_cr(vals(□))⟧, front_some(l, j, e, x, ye, oe)),
+          ⊢ Eq(
+              Option(List(Nat)),
+              strip_cr_cons(
+                UInt::val8(x),
+                vals(between(l, Succ(j), e)),
+                strip_cr(vals(between(l, Succ(j), e)))
+              ),
+              opt_init(l, j, cr_lt2((Succ(j) < e), x, Bytes::Mk(l), j, e, k2))
+            ) from match Succ(j) < e eqn ye2 {
+  false => cr_end(
+              l,
+              j,
+              x,
+              vals(between(l, Succ(j), e)),
+              Eq::congr(⟦vals(□)⟧, front_past(l, Succ(j), e, ye2))
+            )
+  true => opt_cases(
+              (o2: Option(UInt(8))) => Eq(
+                Option(List(Nat)),
+                strip_cr_cons(
+                  UInt::val8(x),
+                  vals(between(l, Succ(j), e)),
+                  strip_cr(vals(between(l, Succ(j), e)))
+                ),
+                opt_init(l, j, cr_get2(o2, x, Bytes::Mk(l), j, e, k2))
+              ),
+              List::nth(l, Succ(j)),
+              (oe2: List::nth(l, Succ(j)) = None) => cr_end(
+                l,
+                j,
+                x,
+                vals(between(l, Succ(j), e)),
+                Eq::congr(⟦vals(□)⟧, front_none(l, Succ(j), e, ye2, oe2))
+              ),
+              (w: UInt(8)) => (oe2: List::nth(l, Succ(j)) = Some(w)) => Eq::trans(
+                Eq::congr(
+                  (t: List(Nat)) => strip_cr_cons(
+                    UInt::val8(x),
+                    t,
+                    strip_cr(vals(between(l, Succ(j), e)))
+                  ),
+                  Eq::congr(⟦vals(□)⟧, front_some(l, Succ(j), e, w, ye2, oe2))
+                ),
+                Eq::trans(
+                  Eq::congr(
+                    ⟦cons_some(UInt::val8(x), □)⟧,
+                    cr_eq(
+                      l,
+                      Succ(j),
+                      e,
+                      k2,
+                      Eq::trans(Eq::congr(⟦e <= □⟧, Nat::add_succ_left(j, k2)), hk)
+                    )
+                  ),
+                  cons_init(
+                    l,
+                    j,
+                    x,
+                    cr_at(Bytes::Mk(l), Succ(j), e, k2),
+                    oe,
+                    cr_gt(l, j, Succ(j), e, k2, lt_succ_self(j))
+                  )
+                )
+              )
+            )
+}
+        )
+      )
+    }
+  }
+}
+
+// ---- texts cut from the bytes --------------------------------------------------------
+
+pub theorem sub_ss(a: Nat, b: Nat): Succ(a) - Succ(b) = a - b {
+  Refl
+}
+
+pub theorem take_nil<A: Type>(n: Nat): List::take(n, List::Nil(<A: A>)) = Nil {
+  match n {
+    Zero => Refl
+    Succ(m) => Refl
+  }
+}
+
+pub theorem drop_nil<A: Type>(n: Nat): List::drop(n, List::Nil(<A: A>)) = Nil {
+  match n {
+    Zero => Refl
+    Succ(m) => Refl
+  }
+}
+
+// What `Bytes::slice` cuts is `between`.
+pub theorem take_between<A: Type>(
+  l: List(A),
+  s: Nat,
+  e: Nat
+): List::take(e - s, List::drop(s, l)) = between(l, s, e) {
+  match l {
+    Nil => Eq::trans(
+      Eq::congr(⟦List::take(e - s, □)⟧, drop_nil(<A: A>, s)),
+      take_nil(<A: A>, e - s)
+    )
+    Cons(h, t) => ⊢ List::take(
+      e - s,
+      List::drop(s, Cons(h, t))
+    ) = between(Cons(h, t), s, e) from match s {
+      Zero => ⊢ List::take(e - Zero, Cons(h, t)) = between(Cons(h, t), Zero, e) from match e {
+        Zero => Refl
+        Succ(e2) => Eq::congr(⟦Cons(h, □)⟧, take_between(t, Zero, e2))
+      }
+      Succ(s2) => ⊢ List::take(
+        e - Succ(s2),
+        List::drop(s2, t)
+      ) = between(Cons(h, t), Succ(s2), e) from match e {
+        Zero => Eq::congr(⟦List::take(□, List::drop(s2, t))⟧, Nat::sub_zero_left(Succ(s2)))
+        Succ(e2) => Eq::trans(
+          Eq::congr(⟦List::take(□, List::drop(s2, t))⟧, sub_ss(e2, s2)),
+          take_between(t, s2, e2)
+        )
+      }
+    }
+  }
+}
+
+// The text of the bytes from `s` up to `e`, cut from `b` where they are.
+pub fn text_at(b: Bytes, s: Nat, e: Nat): Text {
+  match Bytes::slice(b, s, e) {
+    None => Text::Mk(vals(between(Bytes::to_list(b), s, e)))
+    Some(x) => ⊢ Text from match Text::of_bytes(x) {
+      None => Text::Mk(vals(between(Bytes::to_list(b), s, e)))
+      Some(t) => t
+    }
+  }
+}
+
+pub fn text_of_opt(o: Option(Text), fb: Text): Text {
+  match o {
+    None => fb
+    Some(t) => t
+  }
+}
+
+pub fn text_of_slice(o: Option(Bytes), fb: Text): Text {
+  match o {
+    None => fb
+    Some(x) => text_of_opt(Text::of_bytes(x), fb)
+  }
+}
+
+pub theorem text_eq(
+  l: List(UInt(8)),
+  s: Nat,
+  e: Nat
+): text_at(Bytes::Mk(l), s, e) = Text::Mk(vals(between(l, s, e))) {
+  ⊢ Eq(
+      Text,
+      text_of_slice(
+        ⊢ Option(Bytes) from match s <= e && e <= Bytes::len(Bytes::Mk(l)) {
+          false => None
+          true => Some(Bytes::Mk(List::take(e - s, List::drop(s, l))))
+        },
+        Text::Mk(vals(between(l, s, e)))
+      ),
+      Text::Mk(vals(between(l, s, e)))
+    ) from match s <= e && e <= Bytes::len(Bytes::Mk(l)) eqn ge {
+    false => Refl
+    true => Eq::trans(
+      Eq::congr(
+        (m: List(UInt(8))) => text_of_opt(Text::of_bytes(Bytes::Mk(m)), Text::Mk(vals(between(l, s, e)))),
+        take_between(l, s, e)
+      ),
+      ⊢ Eq(
+          Text,
+          text_of_opt(
+            ⊢ Option(Text) from match utf8_valid(vals(between(l, s, e))) {
+              true => Some(Text::Mk(vals(between(l, s, e))))
+              false => None
+            },
+            Text::Mk(vals(between(l, s, e)))
+          ),
+          Text::Mk(vals(between(l, s, e)))
+        ) from match utf8_valid(vals(between(l, s, e))) eqn ve {
+  false => Refl
+  true => Refl
+}
+    )
+  }
+}
+
+// ---- a header line --------------------------------------------------------------------
+
+pub theorem le_add_left_at(e: Nat, s: Nat): (e <= s + e) = true {
+  match e {
+    Zero => Refl
+    Succ(e2) => le_add_left_at(e2, s)
+  }
+}
+
+pub fn hdr_cr(o: Option(Nat), b: Bytes, s: Nat, u: Nat, v: Nat): Option(@name Text × @value Text) {
+  match o {
+    None => None
+    Some(e2) => Some(#(@name text_at(b, s, u), @value text_at(b, v, e2)))
+  }
+}
+
+pub fn hdr_pre(o: Option(Nat), b: Bytes, s: Nat, e: Nat, u: Nat): Option(@name Text × @value Text) {
+  match o {
+    None => None
+    Some(v) => hdr_cr(cr_at(b, v, e, e), b, s, u, v)
+  }
+}
+
+// The header on the line from `s` up to `e`, read where it is.
+pub fn header_at(b: Bytes, s: Nat, e: Nat): Option(@name Text × @value Text) {
+  hdr_pre(pre_at(b, Bytes::find(b, 58, s, e), e), b, s, e, Bytes::find(b, 58, s, e))
+}
+
+pub theorem header_eq(
+  l: List(UInt(8)),
+  s: Nat,
+  e: Nat
+): parse_header(vals(between(l, s, e))) = header_at(Bytes::Mk(l), s, e) {
+  Eq::trans(
+    Eq::congr(⟦Header::name_of(□)⟧, until_eq(l, 58, s, e, e, le_add_left_at(e, s))),
+    Eq::trans(
+      Eq::congr(
+        ⟦Header::value_of(vals(between(l, s, until_at(Bytes::Mk(l), 58, s, e, e))), □)⟧,
+        pre_eq(l, until_at(Bytes::Mk(l), 58, s, e, e), e)
+      ),
+      opt_cases(
+        (o: Option(Nat)) => Eq(
+          Option(@name Text × @value Text),
+          Header::value_of(
+            vals(between(l, s, until_at(Bytes::Mk(l), 58, s, e, e))),
+            opt_rest(l, o, e)
+          ),
+          hdr_pre(o, Bytes::Mk(l), s, e, until_at(Bytes::Mk(l), 58, s, e, e))
+        ),
+        pre_at(Bytes::Mk(l), until_at(Bytes::Mk(l), 58, s, e, e), e),
+        (oe: pre_at(Bytes::Mk(l), until_at(Bytes::Mk(l), 58, s, e, e), e) = None) => Refl,
+        (v: Nat) => (oe: pre_at(Bytes::Mk(l), until_at(Bytes::Mk(l), 58, s, e, e), e) = Some(v)) => Eq::trans(
+          Eq::congr(
+            ⟦Header::cr(vals(between(l, s, until_at(Bytes::Mk(l), 58, s, e, e))), □)⟧,
+            cr_eq(l, v, e, e, le_add_left_at(e, v))
+          ),
+          opt_cases(
+            (o2: Option(Nat)) => Eq(
+              Option(@name Text × @value Text),
+              Header::cr(
+                vals(between(l, s, until_at(Bytes::Mk(l), 58, s, e, e))),
+                opt_init(l, v, o2)
+              ),
+              hdr_cr(o2, Bytes::Mk(l), s, until_at(Bytes::Mk(l), 58, s, e, e), v)
+            ),
+            cr_at(Bytes::Mk(l), v, e, e),
+            (oe2: cr_at(Bytes::Mk(l), v, e, e) = None) => Refl,
+            (e2: Nat) => (oe2: cr_at(Bytes::Mk(l), v, e, e) = Some(e2)) => Eq::sym(
+              Eq::trans(
+                Eq::congr(
+                  ⟦the(
+                    Option(@name Text × @value Text),
+                    Some(#(@name □, @value text_at(Bytes::Mk(l), v, e2)))
+                  )⟧,
+                  text_eq(l, s, until_at(Bytes::Mk(l), 58, s, e, e))
+                ),
+                Eq::congr(
+                  ⟦the(
+                    Option(@name Text × @value Text),
+                    Some(
+                      #(
+                        @name Text::Mk(vals(between(l, s, until_at(Bytes::Mk(l), 58, s, e, e)))),
+                        @value □
+                      )
+                    )
+                  )⟧,
+                  text_eq(l, v, e2)
+                )
+              )
+            )
+          )
+        )
+      )
+    )
+  )
+}
+
+// ---- the empty line -------------------------------------------------------------------
+
+pub fn bl_get2(o: Option(UInt(8)), x: UInt(8)): Bool {
+  match o {
+    None => Nat::eq(UInt::val8(x), 13)
+    Some(w) => false
+  }
+}
+
+pub fn bl_lt2(y: Bool, x: UInt(8), b: Bytes, s: Nat): Bool {
+  match y {
+    false => Nat::eq(UInt::val8(x), 13)
+    true => bl_get2(Bytes::get(b, Succ(s)), x)
+  }
+}
+
+pub fn bl_get(o: Option(UInt(8)), b: Bytes, s: Nat, e: Nat): Bool {
+  match o {
+    None => false
+    Some(x) => bl_lt2(Succ(s) < e, x, b, s)
+  }
+}
+
+pub fn bl_lt(y: Bool, b: Bytes, s: Nat, e: Nat): Bool {
+  match y {
+    false => false
+    true => bl_get(Bytes::get(b, s), b, s, e)
+  }
+}
+
+// Whether the line from `s` up to `e` is the empty line (only its carriage return).
+pub fn blank_at(b: Bytes, s: Nat, e: Nat): Bool {
+  bl_lt(s < e, b, s, e)
+}
+
+pub theorem blank_eq(
+  l: List(UInt(8)),
+  s: Nat,
+  e: Nat
+): is_blank(vals(between(l, s, e))) = blank_at(Bytes::Mk(l), s, e) {
+  ⊢ Eq(
+    Bool,
+    is_blank(vals(between(l, s, e))),
+    bl_lt((s < e), Bytes::Mk(l), s, e)
+  ) from match s < e eqn ye {
+    false => Eq::congr(⟦is_blank(vals(□))⟧, front_past(l, s, e, ye))
+    true => opt_cases(
+      (o: Option(UInt(8))) => Eq(
+        Bool,
+        is_blank(vals(between(l, s, e))),
+        bl_get(o, Bytes::Mk(l), s, e)
+      ),
+      List::nth(l, s),
+      (oe: List::nth(l, s) = None) => Eq::congr(⟦is_blank(vals(□))⟧, front_none(l, s, e, ye, oe)),
+      (x: UInt(8)) => (oe: List::nth(l, s) = Some(x)) => Eq::trans(
+        Eq::congr(⟦is_blank(vals(□))⟧, front_some(l, s, e, x, ye, oe)),
+        ⊢ Eq(
+            Bool,
+            blank_tail(UInt::val8(x), vals(between(l, Succ(s), e))),
+            bl_lt2((Succ(s) < e), x, Bytes::Mk(l), s)
+          ) from match Succ(s) < e eqn ye2 {
+  false => Eq::congr(
+            (t: List(UInt(8))) => blank_tail(UInt::val8(x), vals(t)),
+            front_past(l, Succ(s), e, ye2)
+          )
+  true => opt_cases(
+            (o2: Option(UInt(8))) => Eq(
+              Bool,
+              blank_tail(UInt::val8(x), vals(between(l, Succ(s), e))),
+              bl_get2(o2, x)
+            ),
+            List::nth(l, Succ(s)),
+            (oe2: List::nth(l, Succ(s)) = None) => Eq::congr(
+              (t: List(UInt(8))) => blank_tail(UInt::val8(x), vals(t)),
+              front_none(l, Succ(s), e, ye2, oe2)
+            ),
+            (w: UInt(8)) => (oe2: List::nth(l, Succ(s)) = Some(w)) => Eq::congr(
+              (t: List(UInt(8))) => blank_tail(UInt::val8(x), vals(t)),
+              front_some(l, Succ(s), e, w, ye2, oe2)
+            )
+          )
+}
+      )
+    )
+  }
+}
+
+// ---- the request ----------------------------------------------------------------------
+
+// The empty line's carriage return and what follows the last line feed.
+pub fn head_tail(): List(List(Nat)) {
+  Cons(Cons(13, Nil), Cons(List::Nil(<A: Nat>), Nil))
+}
+
+// `parse_headers` over the lines of `ps`, then the empty line.
+pub fn headers_at(b: Bytes, ps: List(Span)): Option(List(@name Text × @value Text) × List(Nat)) {
+  match ps {
+    Nil => parse_headers(head_tail())
+    Cons(p, more) => ⊢ Option(List(@name Text × @value Text) × List(Nat)) from match p {
+      MkSpan(s, e) => ⊢ Option(
+        List(@name Text × @value Text) × List(Nat)
+      ) from match blank_at(b, s, e) {
+        true => Some(#(Nil, unlines(List::append(spans_vals(b, more), head_tail()))))
+        false => ⊢ Option(List(@name Text × @value Text) × List(Nat)) from match header_at(b, s, e) {
+          None => None
+          Some(x) => cons_headers(x, headers_at(b, more))
+        }
+      }
+    }
+  }
+}
+
+pub fn hd_pick(
+  z: Bool,
+  o: Option(@name Text × @value Text),
+  r: Option(List(@name Text × @value Text) × List(Nat)),
+  more: List(List(Nat))
+): Option(List(@name Text × @value Text) × List(Nat)) {
+  match z {
+    true => Some(#(Nil, unlines(more)))
+    false => ⊢ Option(List(@name Text × @value Text) × List(Nat)) from match o {
+      None => None
+      Some(x) => cons_headers(x, r)
+    }
+  }
+}
+
+pub theorem headers_eq(
+  l: List(UInt(8)),
+  ps: List(Span)
+): parse_headers(
+  List::append(spans_vals(Bytes::Mk(l), ps), head_tail())
+) = headers_at(Bytes::Mk(l), ps) {
+  match ps {
+    Nil => Refl
+    Cons(p, more) => ⊢ parse_headers(
+      List::append(spans_vals(Bytes::Mk(l), Cons(p, more)), head_tail())
+    ) = headers_at(Bytes::Mk(l), Cons(p, more)) from match p {
+      MkSpan(s, e) => Eq::trans(
+        Eq::congr(
+          (z: Bool) => hd_pick(
+            z,
+            parse_header(vals(between(l, s, e))),
+            parse_headers(List::append(spans_vals(Bytes::Mk(l), more), head_tail())),
+            List::append(spans_vals(Bytes::Mk(l), more), head_tail())
+          ),
+          blank_eq(l, s, e)
+        ),
+        Eq::trans(
+          Eq::congr(
+            (o: Option(@name Text × @value Text)) => hd_pick(
+              blank_at(Bytes::Mk(l), s, e),
+              o,
+              parse_headers(List::append(spans_vals(Bytes::Mk(l), more), head_tail())),
+              List::append(spans_vals(Bytes::Mk(l), more), head_tail())
+            ),
+            header_eq(l, s, e)
+          ),
+          Eq::congr(
+            (r: Option(List(@name Text × @value Text) × List(Nat))) => hd_pick(
+              blank_at(Bytes::Mk(l), s, e),
+              header_at(Bytes::Mk(l), s, e),
+              r,
+              List::append(spans_vals(Bytes::Mk(l), more), head_tail())
+            ),
+            headers_eq(l, more)
+          )
+        )
+      )
+    }
+  }
+}
+
+// The bytes from `s` up to `e`, cut from `b` and then made a list.
+pub fn line_vals(b: Bytes, s: Nat, e: Nat): List(Nat) {
+  match Bytes::slice(b, s, e) {
+    None => vals(between(Bytes::to_list(b), s, e))
+    Some(x) => vals(Bytes::to_list(x))
+  }
+}
+
+pub theorem line_vals_eq(
+  l: List(UInt(8)),
+  s: Nat,
+  e: Nat
+): line_vals(Bytes::Mk(l), s, e) = vals(between(l, s, e)) {
+  ⊢ Eq(
+      List(Nat),
+      ⊢ List(Nat) from match (⊢ Option(Bytes) from match s <= e && e <= Bytes::len(Bytes::Mk(l)) {
+        false => None
+        true => Some(Bytes::Mk(List::take(e - s, List::drop(s, l))))
+      }) {
+        None => vals(between(l, s, e))
+        Some(x) => vals(Bytes::to_list(x))
+      },
+      vals(between(l, s, e))
+    ) from match s <= e && e <= Bytes::len(Bytes::Mk(l)) eqn ge {
+    false => Refl
+    true => Eq::congr(⟦vals(□)⟧, take_between(l, s, e))
+  }
+}
+
+pub theorem spans_append(
+  b: Bytes,
+  a: List(Span),
+  c: List(Span)
+): spans_vals(b, List::append(a, c)) = List::append(spans_vals(b, a), spans_vals(b, c)) {
+  match a {
+    Nil => Refl
+    Cons(p, t) => Eq::congr(⟦Cons(span_vals(b, p), □)⟧, spans_append(b, t, c))
+  }
+}
+
+pub theorem spans_reverse(
+  b: Bytes,
+  d: List(Span)
+): List::reverse(spans_vals(b, d)) = spans_vals(b, List::reverse(d)) {
+  match d {
+    Nil => Refl
+    Cons(p, t) => Eq::trans(
+      List::reverse_cons(span_vals(b, p), spans_vals(b, t)),
+      Eq::trans(
+        Eq::congr(⟦List::append(□, Cons(span_vals(b, p), Nil))⟧, spans_reverse(b, t)),
+        Eq::trans(
+          Eq::sym(spans_append(b, List::reverse(t), Cons(p, Nil))),
+          Eq::congr(⟦spans_vals(b, □)⟧, Eq::sym(List::reverse_cons(p, t)))
+        )
+      )
+    )
+  }
+}
+
+// ---- the request line ----------------------------------------------------------------
+
+pub fn q_get(o: Option(UInt(8)), b: Bytes, a: Nat, e: Nat): Option(Text) {
+  match o {
+    None => None
+    Some(c) => Some(text_at(b, Succ(a), e))
+  }
+}
+
+pub fn q_lt(y: Bool, b: Bytes, a: Nat, e: Nat): Option(Text) {
+  match y {
+    false => None
+    true => q_get(Bytes::get(b, a), b, a, e)
+  }
+}
+
+// The query after the `?` at `a`, when there is one before `e`.
+pub fn q_at(b: Bytes, a: Nat, e: Nat): Option(Text) {
+  q_lt(a < e, b, a, e)
+}
+
+pub theorem q_eq(
+  l: List(UInt(8)),
+  a: Nat,
+  e: Nat
+): Query::of(vals(between(l, a, e))) = q_at(Bytes::Mk(l), a, e) {
+  ⊢ Eq(
+    Option(Text),
+    Query::of(vals(between(l, a, e))),
+    q_lt((a < e), Bytes::Mk(l), a, e)
+  ) from match a < e eqn ye {
+    false => Eq::congr(⟦Query::of(vals(□))⟧, front_past(l, a, e, ye))
+    true => opt_cases(
+      (o: Option(UInt(8))) => Eq(
+        Option(Text),
+        Query::of(vals(between(l, a, e))),
+        q_get(o, Bytes::Mk(l), a, e)
+      ),
+      List::nth(l, a),
+      (oe: List::nth(l, a) = None) => Eq::congr(⟦Query::of(vals(□))⟧, front_none(l, a, e, ye, oe)),
+      (c: UInt(8)) => (oe: List::nth(l, a) = Some(c)) => Eq::trans(
+        Eq::congr(⟦Query::of(vals(□))⟧, front_some(l, a, e, c, ye, oe)),
+        Eq::sym(Eq::congr(⟦the(Option(Text), Some(□))⟧, text_eq(l, Succ(a), e)))
+      )
+    )
+  }
+}
+
+pub fn st_rest(z: Bool, b: Bytes, m: Method, p: Nat, u2: Nat): Option(Start) {
+  match z {
+    false => None
+    true => Some(
+      Start::Mk(m, text_at(b, p, Bytes::find(b, 63, p, u2)), q_at(b, Bytes::find(b, 63, p, u2), u2))
+    )
+  }
+}
+
+pub fn st_get(o: Option(UInt(8)), b: Bytes, m: Method, u1: Nat, e: Nat): Option(Start) {
+  match o {
+    None => None
+    Some(c) => st_rest(
+      byte_list_eq(line_vals(b, Bytes::find(b, 32, Succ(u1), e), e), Cons(32, version_tail())),
+      b,
+      m,
+      Succ(u1),
+      Bytes::find(b, 32, Succ(u1), e)
+    )
+  }
+}
+
+pub fn st_lt(y: Bool, b: Bytes, m: Method, u1: Nat, e: Nat): Option(Start) {
+  match y {
+    false => None
+    true => st_get(Bytes::get(b, u1), b, m, u1, e)
+  }
+}
+
+pub fn st_target(o: Option(Method), b: Bytes, u1: Nat, e: Nat): Option(Start) {
+  match o {
+    None => None
+    Some(m) => st_lt(u1 < e, b, m, u1, e)
+  }
+}
+
+pub module Head {
+  pub theorem start_done(
+    l: List(UInt(8)),
+    m: Method,
+    p: Nat,
+    u2: Nat,
+    z: Bool
+  ): Start::done(m, vals(between(l, p, u2)), z) = st_rest(z, Bytes::Mk(l), m, p, u2) {
+    match z {
+      false => Refl
+      true => Eq::trans(
+        Eq::congr(⟦start_of(m, □)⟧, until_eq(l, 63, p, u2, u2, le_add_left_at(u2, p))),
+        Eq::trans(
+          Eq::congr(
+            ⟦the(
+              Option(Start),
+              Some(
+                Start::Mk(
+                  m,
+                  □,
+                  Query::of(vals(between(l, until_at(Bytes::Mk(l), 63, p, u2, u2), u2)))
+                )
+              )
+            )⟧,
+            Eq::sym(text_eq(l, p, until_at(Bytes::Mk(l), 63, p, u2, u2)))
+          ),
+          Eq::congr(
+            ⟦the(
+              Option(Start),
+              Some(Start::Mk(m, text_at(Bytes::Mk(l), p, until_at(Bytes::Mk(l), 63, p, u2, u2)), □))
+            )⟧,
+            q_eq(l, until_at(Bytes::Mk(l), 63, p, u2, u2), u2)
+          )
+        )
+      )
+    }
+  }
+}
+
+// The request line from `s` up to `e`, read where it is.
+pub fn start_at(b: Bytes, s: Nat, e: Nat): Option(Start) {
+  st_target(Method::of(line_vals(b, s, Bytes::find(b, 32, s, e))), b, Bytes::find(b, 32, s, e), e)
+}
+
+pub theorem start_eq(
+  l: List(UInt(8)),
+  s: Nat,
+  e: Nat
+): parse_start(vals(between(l, s, e))) = start_at(Bytes::Mk(l), s, e) {
+  Eq::trans(
+    Eq::congr(⟦Start::method(□)⟧, until_eq(l, 32, s, e, e, le_add_left_at(e, s))),
+    Eq::trans(
+      Eq::congr(
+        ⟦Start::target(Method::of(□), vals(between(l, until_at(Bytes::Mk(l), 32, s, e, e), e)))⟧,
+        Eq::sym(line_vals_eq(l, s, until_at(Bytes::Mk(l), 32, s, e, e)))
+      ),
+      opt_cases(
+        (o: Option(Method)) => Eq(
+          Option(Start),
+          Start::target(o, vals(between(l, until_at(Bytes::Mk(l), 32, s, e, e), e))),
+          st_target(o, Bytes::Mk(l), until_at(Bytes::Mk(l), 32, s, e, e), e)
+        ),
+        Method::of(line_vals(Bytes::Mk(l), s, until_at(Bytes::Mk(l), 32, s, e, e))),
+        (oe: Method::of(line_vals(Bytes::Mk(l), s, until_at(Bytes::Mk(l), 32, s, e, e))) = None) => Refl,
+        (m: Method) => (oe: Method::of(line_vals(Bytes::Mk(l), s, until_at(Bytes::Mk(l), 32, s, e, e))) = Some(m)) => ⊢ Eq(
+            Option(Start),
+            Start::target(Some(m), vals(between(l, until_at(Bytes::Mk(l), 32, s, e, e), e))),
+            st_lt((until_at(Bytes::Mk(l), 32, s, e, e) < e), Bytes::Mk(l), m, until_at(Bytes::Mk(l), 32, s, e, e), e)
+          ) from match until_at(Bytes::Mk(l), 32, s, e, e) < e eqn ye {
+  false => Eq::congr(
+            (t: List(UInt(8))) => Start::target(Some(m), vals(t)),
+            front_past(l, until_at(Bytes::Mk(l), 32, s, e, e), e, ye)
+          )
+  true => opt_cases(
+            (o2: Option(UInt(8))) => Eq(
+              Option(Start),
+              Start::target(Some(m), vals(between(l, until_at(Bytes::Mk(l), 32, s, e, e), e))),
+              st_get(o2, Bytes::Mk(l), m, until_at(Bytes::Mk(l), 32, s, e, e), e)
+            ),
+            List::nth(l, until_at(Bytes::Mk(l), 32, s, e, e)),
+            (oe2: List::nth(l, until_at(Bytes::Mk(l), 32, s, e, e)) = None) => Eq::congr(
+              (t: List(UInt(8))) => Start::target(Some(m), vals(t)),
+              front_none(l, until_at(Bytes::Mk(l), 32, s, e, e), e, ye, oe2)
+            ),
+            (c: UInt(8)) => (oe2: List::nth(l, until_at(Bytes::Mk(l), 32, s, e, e)) = Some(c)) => Eq::trans(
+              Eq::congr(
+                (t: List(UInt(8))) => Start::target(Some(m), vals(t)),
+                front_some(l, until_at(Bytes::Mk(l), 32, s, e, e), e, c, ye, oe2)
+              ),
+              Eq::trans(
+                Eq::congr(
+                  ⟦Start::rest(m, □)⟧,
+                  until_eq(
+                    l,
+                    32,
+                    Succ(until_at(Bytes::Mk(l), 32, s, e, e)),
+                    e,
+                    e,
+                    le_add_left_at(e, Succ(until_at(Bytes::Mk(l), 32, s, e, e)))
+                  )
+                ),
+                Eq::trans(
+                  Eq::congr(
+                    ⟦Start::done(
+                      m,
+                      vals(
+                        between(
+                          l,
+                          Succ(until_at(Bytes::Mk(l), 32, s, e, e)),
+                          until_at(
+                            Bytes::Mk(l),
+                            32,
+                            Succ(until_at(Bytes::Mk(l), 32, s, e, e)),
+                            e,
+                            e
+                          )
+                        )
+                      ),
+                      byte_list_eq(□, Cons(32, version_tail()))
+                    )⟧,
+                    Eq::sym(
+                      line_vals_eq(
+                        l,
+                        until_at(Bytes::Mk(l), 32, Succ(until_at(Bytes::Mk(l), 32, s, e, e)), e, e),
+                        e
+                      )
+                    )
+                  ),
+                  Head::start_done(
+                    l,
+                    m,
+                    Succ(until_at(Bytes::Mk(l), 32, s, e, e)),
+                    until_at(Bytes::Mk(l), 32, Succ(until_at(Bytes::Mk(l), 32, s, e, e)), e, e),
+                    byte_list_eq(
+                      line_vals(
+                        Bytes::Mk(l),
+                        until_at(Bytes::Mk(l), 32, Succ(until_at(Bytes::Mk(l), 32, s, e, e)), e, e),
+                        e
+                      ),
+                      Cons(32, version_tail())
+                    )
+                  )
+                )
+              )
+            )
+          )
+}
+      )
+    )
+  )
+}
+
+// `parse_lines` over the lines of `ps`, then the empty line.
+pub fn lines_at(b: Bytes, ps: List(Span)): Option(HttpRequest) {
+  match ps {
+    Nil => parse_lines(head_tail())
+    Cons(p, more) => ⊢ Option(HttpRequest) from match p {
+      MkSpan(s, e) => build_request(start_at(b, s, e), headers_at(b, more))
+    }
+  }
+}
+
+pub theorem lines_eq(
+  l: List(UInt(8)),
+  ps: List(Span)
+): parse_lines(
+  List::append(spans_vals(Bytes::Mk(l), ps), head_tail())
+) = lines_at(Bytes::Mk(l), ps) {
+  match ps {
+    Nil => Refl
+    Cons(p, more) => ⊢ parse_lines(
+      List::append(spans_vals(Bytes::Mk(l), Cons(p, more)), head_tail())
+    ) = lines_at(Bytes::Mk(l), Cons(p, more)) from match p {
+      MkSpan(s, e) => Eq::trans(
+        Eq::congr(
+          ⟦build_request(
+            □,
+            parse_headers(List::append(spans_vals(Bytes::Mk(l), more), head_tail()))
+          )⟧,
+          start_eq(l, s, e)
+        ),
+        Eq::congr(⟦build_request(start_at(Bytes::Mk(l), s, e), □)⟧, headers_eq(l, more))
+      )
+    }
+  }
+}
+
+// The request on the lines the head reader found, read where they are.
+pub theorem request_at(
+  b: Bytes,
+  done: List(Span)
+): parse_lines(Head::lines_of(spans_vals(b, done))) = lines_at(b, List::reverse(done)) {
+  match b {
+    Bytes::Mk(l) => Eq::trans(
+      Eq::congr(⟦parse_lines(List::append(□, head_tail()))⟧, spans_reverse(Bytes::Mk(l), done)),
+      lines_eq(l, List::reverse(done))
+    )
+  }
+}

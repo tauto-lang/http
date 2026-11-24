@@ -1,0 +1,1050 @@
+import std::base { List }
+import std::builtin::macro {
+  Syn,
+  SynArm,
+  SynCtor,
+  SynCtx,
+  SynData,
+  SynExpr,
+  SynFn,
+  SynIdent,
+  SynPattern,
+  SynRowEntry,
+  SynSpan,
+  SynHighlight,
+  SynStmt,
+  SynTok,
+  SynToken,
+  macro_error
+}
+// The generated code names these with `Syn::global`.
+import "../../http/src/http.taut" { HttpRequest, Method }
+import "effects.taut" { answer_request }
+import "path.taut" { path_i64, path_nat, path_text, path_u64, query_value, segments }
+import "response.taut" { Response, method_not_allowed }
+
+// ---- `tauto fmt` ------------------------------------------------------------------------------
+// One entry a line, indented two spaces for each `{` of a route's children, a blank line kept
+// where the table has one. A text with a comment is left as written.
+
+pub fn fmt_pad(n: u64): Text ! {div, overflow} {
+  if n == 0 { "" } else { concat("  ", fmt_pad(n - 1)) }
+}
+
+pub fn fmt_kids(st: List(Text)): u64 ! {div, overflow} {
+  match st {
+    Nil => 0
+    Cons(k, rest) => if k == "kids" { 1 + fmt_kids(rest) } else { fmt_kids(rest) }
+  }
+}
+
+pub fn fmt_plain(ts: List(SynTok)): Bool ! {div, overflow} {
+  match ts {
+    Nil => true
+    Cons(t, rest) => if t.skipped && t.kind != "Newline" && t.kind != "Whitespace" {
+      false
+    } else {
+      fmt_plain(rest)
+    }
+  }
+}
+
+// `p` is the token before (`/` for a path; `}cap`, `}row` or `}kids` for a `}`), `tight` that no
+// space goes before
+// the next token, `nl` the line breaks since it and `st` the braces open: `cap` for a capture,
+// `row` for the row and `kids` for the children of a route.
+pub fn fmt_go(
+  ts: List(SynTok),
+  p: Text,
+  tight: Bool,
+  nl: u64,
+  st: List(Text)
+): Text ! {div, overflow} {
+  match ts {
+    Nil => ""
+    Cons(t, rest) => if t.skipped {
+      fmt_go(rest, p, tight, if t.kind == "Newline" { nl + 1 } else { nl }, st)
+    } else {
+      let x := t.text
+      let path := t.kind == "Literal" || t.kind == "CatchAll"
+      let top := match st {
+        Nil => ""
+        Cons(k, _) => k
+      }
+      if x == "{" {
+        let kind := if p == "/" { "cap" } else if p == "!" { "row" } else { "kids" }
+        concat(
+          if kind == "cap" { "" } else { " " },
+          concat("{", fmt_go(rest, "{", kind == "cap", 0, Cons(kind, st)))
+        )
+      } else if x == "}" {
+        let below := match st {
+          Nil => Nil
+          Cons(_, rest_st) => rest_st
+        }
+        let prefix := if top == "cap" {
+          ""
+        } else if top == "row" {
+          if p == "{" { "" } else { " " }
+        } else if p == "{" {
+          " "
+        } else {
+          concat("\n", fmt_pad(fmt_kids(below)))
+        }
+        concat(prefix, concat("}", fmt_go(rest, concat("}", top), false, 0, below)))
+      } else {
+        let start := (x == "middleware" && p != ":" && p != ",") ||
+        (path && p != "}cap")
+        let prefix := if p == "" {
+          ""
+        } else if start {
+          concat(if nl > 1 && p != "{" { "\n\n" } else { "\n" }, fmt_pad(fmt_kids(st)))
+        } else if x == "," || x == ":" || x == "]" || x == "&" || tight || (path && p == "}cap") {
+          ""
+        } else {
+          " "
+        }
+        concat(
+          prefix,
+          concat(
+            x,
+            fmt_go(rest, if path { "/" } else { x }, x == "?" || x == "[" || x == "&", 0, st)
+          )
+        )
+      }
+    }
+  }
+}
+
+pub fn router_fmt(ts: List(SynTok), width: u64): Option(Text) ! {div, overflow} {
+  if fmt_plain(ts) { Some(concat(fmt_go(ts, "", false, 0, Nil), "\n")) } else { None }
+}
+
+// ---- the colours ------------------------------------------------------------------------------
+// A path is a string, `middleware` and a method are keywords, the name before a `:` of a capture or
+// a query is a property, what a method or `middleware` names is a function, a type after a `:` is
+// a type, and the route's own name is an enum member.
+
+pub fn tokens_colon(ts: List(SynTok)): Bool {
+  match ts {
+    Nil => false
+    Cons(t, rest) => if t.skipped { tokens_colon(rest) } else { t.text == ":" }
+  }
+}
+
+pub fn tokens_method(x: Text): Bool {
+  x == "get" || x == "post" || x == "put" || x == "patch" || x == "delete" || x == "head" ||
+  x == "options" || x == "any"
+}
+
+// `after` is what the `:` before this token follows: `kw` for `middleware` or a method, else `name`.
+pub fn tokens_go(ts: List(SynTok), prev: Text, after: Text): List(SynHighlight) ! {div} {
+  match ts {
+    Nil => Nil
+    Cons(t, rest) => if t.skipped {
+      tokens_go(rest, prev, after)
+    } else {
+      let x := t.text
+      let colon := tokens_colon(rest)
+      let kind := if t.kind == "Literal" || t.kind == "CatchAll" {
+        "string"
+      } else if colon && (x == "middleware" || tokens_method(x)) {
+        "keyword"
+      } else if x == "!" || x == "?" || x == "&" || x == "{" || x == "}" || x == "[" || x == "]" ||
+      x == "," || x == ":" {
+        "operator"
+      } else if colon {
+        "property"
+      } else if (prev == ":" || prev == ",") && after == "kw" {
+        "function"
+      } else if prev == ":" {
+        "type"
+      } else {
+        "enumMember"
+      }
+      let next_after := if kind == "keyword" {
+        "kw"
+      } else if kind == "operator" || kind == "function" {
+        after
+      } else {
+        "name"
+      }
+      Cons(SynHighlight { start: t.start, end: t.end, kind: kind }, tokens_go(rest, x, next_after))
+    }
+  }
+}
+
+pub fn router_tokens(ts: List(SynTok)): List(SynHighlight) ! {div} {
+  tokens_go(ts, "", "name")
+}
+
+// `router!` reads a route table and writes `enum Route`, `fn route` and
+// `fn handler`. `route` looks at the path and the query only, and performs
+// nothing. `handler` answers `get_headers`, `set_header` and
+// `request_body`, runs the middleware from the outside in, then the method.
+//
+// The first line names the enum and the row `handler` is left with: the
+// effects the middleware and the handlers still perform once the middleware
+// has handled what it handles. `! {}` is the empty row.
+//
+// A route is a path, an optional query, the name of its constructor, its
+// methods and, in braces, its children and their middleware. A capture
+// `{user_id: UserId}` is one whole segment; `?page: Nat` must be present and
+// `?[title: Text]` is an `Option(Text)`. `Text`, `Nat`, `u64` and `i64` are
+// read by `path.taut`; another type `T` by `T::from_path`. `/*` is the last
+// route at the top, and its methods cover every method.
+syntax!(router_syntax, ```par
+%start Router
+%title "router"
+%%
+Router: Name Row { Entry };
+Row: Bang LBrace [ Names ] RBrace;
+Names: Name { CommaName };
+CommaName: Comma Name;
+Entry: Middleware | Route;
+Middleware: MiddlewareKw Colon Names;
+Route: Path [ Query ] Name { Verb } [ Children ];
+Path: CatchAll | Pattern;
+Pattern: Literal { PathPart };
+PathPart: Capture | Literal;
+Capture: LBrace Name Colon Name RBrace;
+Query: Question QueryItem { AmpItem };
+AmpItem: Amp QueryItem;
+QueryItem: Field | OptionalField;
+OptionalField: LBracket Field RBracket;
+Field: Name Colon Name;
+Verb: Method Colon Name;
+Children: LBrace { Entry } RBrace;
+MiddlewareKw: 'middleware';
+Method: 'get' | 'post' | 'put' | 'patch' | 'delete' | 'head' | 'options' | 'any';
+CatchAll: '/*';
+Question: '?';
+Bang: '!';
+Amp: '&';
+Colon: ':';
+Comma: ',';
+LBrace: '{';
+RBrace: '}';
+LBracket: '[';
+RBracket: ']';
+Literal: /\/[A-Za-z0-9_.~\/-]*/;
+Name: /[A-Za-z_][A-Za-z0-9_]*/;
+```, with(fmt: router_fmt, tokens: router_tokens)) =>
+  struct AmpItem, struct Capture, struct Children, struct CommaName, enum Entry, struct Field,
+  enum Method, struct Middleware, struct Names, struct OptionalField, enum Path, enum PathPart,
+  struct Pattern, struct Query, enum QueryItem, struct Route, struct Router, struct Row,
+  struct Verb, fn parse
+
+fn fail(at: SynSpan, message: Text): Never ! {macro_error} {
+  Syn::error(at, message)
+}
+
+fn inc(i: u64): u64 {
+  handle { i + 1 } with { overflow() => i }
+}
+
+fn has_text(xs: List(Text), x: Text): Bool {
+  match xs {
+    Nil => false
+    Cons(y, rest) => y == x || has_text(rest, x)
+  }
+}
+
+fn last_byte_is(t: Text, b: u64): Bool {
+  let n := Text::len(t)
+  if n == 0 {
+    false
+  } else {
+    match Text::byte(t, handle { n - 1 } with { overflow() => 0 }) {
+      Some(c) => U64::of_u8(c) == b
+      None => false
+    }
+  }
+}
+
+fn first_byte_is(t: Text, b: u64): Bool {
+  match Text::byte(t, 0) {
+    Some(c) => U64::of_u8(c) == b
+    None => false
+  }
+}
+
+// ---- the table, read ------------------------------------------------------------------------
+
+enum Seg { Lit(Text), Param(SynToken, SynToken) }
+
+struct QItem { name: SynToken, ty: SynToken, optional: Bool }
+
+struct Slot { name: Text, ty: SynExpr, ident: SynIdent }
+
+struct Verb { method: Text, handler: SynIdent }
+
+struct Flat {
+  ctor: SynIdent,
+  slots: List(Slot),
+  record: SynIdent,
+  segs: List(Seg),
+  queries: List(QItem),
+  middleware: List(SynToken),
+  verbs: List(Verb),
+  catch_all: Bool,
+  span: SynSpan
+}
+
+fn names_of(ns: router_syntax::Names): List(SynToken) {
+  Cons(ns.name, List::map((c: router_syntax::CommaName) => c.name, ns.comma_name))
+}
+
+fn row_of(r: router_syntax::Row): List(SynRowEntry) {
+  match r.names {
+    None => Nil
+    Some(ns) => List::map((t: SynToken) => EffName(t.text, None), names_of(ns))
+  }
+}
+
+fn method_text(m: router_syntax::Method): Text {
+  match m {
+    router_syntax::Method::Get { span, get } => "get"
+    router_syntax::Method::Post { span, post } => "post"
+    router_syntax::Method::Put { span, put } => "put"
+    router_syntax::Method::Patch { span, patch } => "patch"
+    router_syntax::Method::Delete { span, delete } => "delete"
+    router_syntax::Method::Head { span, head } => "head"
+    router_syntax::Method::Options { span, options } => "options"
+    router_syntax::Method::Any { span, any } => "any"
+  }
+}
+
+fn lit_segs(t: Text): List(Seg) {
+  List::map((s: Text) => Lit(s), segments(t))
+}
+
+// The segments of a path. A capture is one whole segment: the text before
+// it ends with `/`, and the text after it starts with `/`.
+fn parts_segs(
+  ps: List(router_syntax::PathPart),
+  after_slash: Bool
+): List(Seg) ! {macro_error, div} {
+  match ps {
+    Nil => Nil
+    Cons(p, rest) => match p {
+      router_syntax::PathPart::Literal(tok) => if after_slash || first_byte_is(tok.text, 47) {
+        Syn::append(lit_segs(tok.text), parts_segs(rest, last_byte_is(tok.text, 47)))
+      } else {
+        fail(tok.span, "router: a capture is a whole segment; write `/` after it")
+      }
+      router_syntax::PathPart::Capture(c) => if after_slash {
+        Cons(Param(c.name, c.name_2), parts_segs(rest, false))
+      } else {
+        fail(c.span, "router: a capture is a whole segment; write `/` before it")
+      }
+    }
+  }
+}
+
+fn pattern_segs(p: router_syntax::Pattern): List(Seg) ! {macro_error, div} {
+  Syn::append(lit_segs(p.literal.text), parts_segs(p.path_part, last_byte_is(p.literal.text, 47)))
+}
+
+fn qitem(q: router_syntax::QueryItem): QItem {
+  match q {
+    router_syntax::QueryItem::Field(f) => QItem { name: f.name, ty: f.name_2, optional: false }
+    router_syntax::QueryItem::OptionalField(o) => QItem {
+      name: o.field.name,
+      ty: o.field.name_2,
+      optional: true
+    }
+  }
+}
+
+fn queries_of(q: Option(router_syntax::Query)): List(QItem) {
+  match q {
+    None => Nil
+    Some(q) => Cons(
+      qitem(q.query_item),
+      List::map((a: router_syntax::AmpItem) => qitem(a.query_item), q.amp_item)
+    )
+  }
+}
+
+fn verbs_of(vs: List(router_syntax::Verb), seen: List(Text)): List(Verb) ! {macro_error, div} {
+  match vs {
+    Nil => Nil
+    Cons(v, rest) => {
+      let m := method_text(v.method)
+      if has_text(seen, m) {
+        fail(v.span, concat("router: method twice: ", m))
+      } else {
+        Cons(Verb { method: m, handler: Syn::ident(v.name) }, verbs_of(rest, Cons(m, seen)))
+      }
+    }
+  }
+}
+
+fn middleware_of(es: List(router_syntax::Entry)): List(SynToken) {
+  match es {
+    Nil => Nil
+    Cons(e, rest) => match e {
+      router_syntax::Entry::Middleware(m) => Syn::append(names_of(m.names), middleware_of(rest))
+      router_syntax::Entry::Route(r) => middleware_of(rest)
+    }
+  }
+}
+
+fn children_of(c: Option(router_syntax::Children)): List(router_syntax::Entry) {
+  match c {
+    None => Nil
+    Some(c) => c.entry
+  }
+}
+
+// ---- the table, flat --------------------------------------------------------------------------
+
+fn local(name: Text, at: SynSpan): SynIdent {
+  SynIdent { declaration: None, name: name, ctx: SynCtx { scopes: Nil }, span: at }
+}
+
+fn ty_of(t: SynToken, optional: Bool): SynExpr {
+  let base := ExVar(Syn::ident(t))
+  if optional { ExApp(ExVar(Syn::global("Option")), Cons(base, Nil), t.span) } else { base }
+}
+
+fn seg_slots(ss: List(Seg)): List(Slot) {
+  match ss {
+    Nil => Nil
+    Cons(s, rest) => match s {
+      Lit(t) => seg_slots(rest)
+      Param(n, ty) => Cons(
+        Slot { name: n.text, ty: ty_of(ty, false), ident: local(n.text, n.span) },
+        seg_slots(rest)
+      )
+    }
+  }
+}
+
+fn query_slots(qs: List(QItem)): List(Slot) {
+  List::map(
+    (q: QItem) => Slot {
+      name: q.name.text,
+      ty: ty_of(q.ty, q.optional),
+      ident: local(q.name.text, q.name.span)
+    },
+    qs
+  )
+}
+
+fn insert_slot(s: Slot, ss: List(Slot), at: SynSpan): List(Slot) ! {macro_error, div} {
+  match ss {
+    Nil => Cons(s, Nil)
+    Cons(t, rest) => if s.name == t.name {
+      fail(at, concat("router: a field twice: ", s.name))
+    } else if Text::compare(s.name, t.name) < 0 {
+      Cons(s, ss)
+    } else {
+      Cons(t, insert_slot(s, rest, at))
+    }
+  }
+}
+
+fn sort_slots(ss: List(Slot), at: SynSpan): List(Slot) ! {macro_error, div} {
+  match ss {
+    Nil => Nil
+    Cons(s, rest) => insert_slot(s, sort_slots(rest, at), at)
+  }
+}
+
+fn dotted(ss: List(Slot)): Text {
+  match ss {
+    Nil => ""
+    Cons(s, Nil) => s.name
+    Cons(s, rest) => concat(s.name, concat(".", dotted(rest)))
+  }
+}
+
+fn has_any(vs: List(Verb)): Bool {
+  match vs {
+    Nil => false
+    Cons(v, rest) => v.method == "any" || has_any(rest)
+  }
+}
+
+fn lower(
+  r: router_syntax::Route,
+  prefix: List(Seg),
+  mw: List(SynToken),
+  model: SynIdent,
+  nested: Bool
+): List(Flat) ! {macro_error, div} {
+  let at := r.span
+  let catch_all := match r.path {
+    router_syntax::Path::CatchAll(t) => true
+    router_syntax::Path::Pattern(p) => false
+  }
+  if catch_all && nested { fail(at, "router: `/*` is only at the top") } else { #() }
+  let segs := match r.path {
+    router_syntax::Path::CatchAll(t) => prefix
+    router_syntax::Path::Pattern(p) => Syn::append(prefix, pattern_segs(p))
+  }
+  let kids := children_of(r.children)
+  let chain := Syn::append(mw, middleware_of(kids))
+  let vs := verbs_of(r.verb, Nil)
+  if has_any(vs) && List::length(vs) != 1 {
+    fail(at, "router: `any` is the only method")
+  } else { #() }
+  let qs := queries_of(r.query)
+  if catch_all {
+    match qs {
+      Nil => #()
+      Cons(q, rest) => fail(at, "router: `/*` has no query")
+    }
+    match kids {
+      Nil => #()
+      Cons(c, rest) => fail(at, "router: `/*` has no children")
+    }
+  } else { #() }
+  let below := lower_all(kids, segs, chain, model, true)
+  match vs {
+    Nil => match below {
+      Nil => fail(at, concat("router: write a method for ", r.name.text))
+      Cons(b, rest) => below
+    }
+    Cons(v, rest) => {
+      let slots := sort_slots(Syn::append(seg_slots(segs), query_slots(qs)), at)
+      Cons(
+        Flat {
+          ctor: Syn::decl_name(model, r.name.text),
+          slots: slots,
+          record: Syn::decl_name(model, concat("@record.", dotted(slots))),
+          segs: segs,
+          queries: qs,
+          middleware: chain,
+          verbs: vs,
+          catch_all: catch_all,
+          span: at
+        },
+        below
+      )
+    }
+  }
+}
+
+fn lower_all(
+  es: List(router_syntax::Entry),
+  prefix: List(Seg),
+  mw: List(SynToken),
+  model: SynIdent,
+  nested: Bool
+): List(Flat) ! {macro_error, div} {
+  match es {
+    Nil => Nil
+    Cons(e, rest) => match e {
+      router_syntax::Entry::Middleware(m) => lower_all(rest, prefix, mw, model, nested)
+      router_syntax::Entry::Route(r) => Syn::append(
+        lower(r, prefix, mw, model, nested),
+        lower_all(rest, prefix, mw, model, nested)
+      )
+    }
+  }
+}
+
+fn check_names(fs: List(Flat), seen: List(Text)): Unit ! {macro_error, div} {
+  match fs {
+    Nil => #()
+    Cons(f, rest) => if has_text(seen, f.ctor.name) {
+      fail(f.span, concat("router: route name twice: ", f.ctor.name))
+    } else {
+      check_names(rest, Cons(f.ctor.name, seen))
+    }
+  }
+}
+
+fn check_tail(fs: List(Flat)): Unit ! {macro_error, div} {
+  match fs {
+    Nil => fail(Syn::call_span(), "router: write `/* Name any: handler` last")
+    Cons(f, Nil) => if f.catch_all { check_any(f) } else {
+      fail(f.span, "router: the last route is `/*`")
+    }
+    Cons(f, rest) => if f.catch_all {
+      fail(f.span, "router: `/*` is the last route")
+    } else {
+      check_tail(rest)
+    }
+  }
+}
+
+fn every_method(vs: List(Verb)): Bool {
+  has_method(
+    vs,
+    "get"
+  ) && has_method(
+    vs,
+    "post"
+  ) && has_method(
+    vs,
+    "put"
+  ) && has_method(
+    vs,
+    "delete"
+  ) && has_method(vs, "patch") && has_method(vs, "head") && has_method(vs, "options")
+}
+
+fn check_any(f: Flat): Unit ! {macro_error, div} {
+  if has_method(f.verbs, "any") || every_method(f.verbs) {
+    #()
+  } else {
+    fail(f.span, "router: `/*` writes `any` or every method")
+  }
+}
+
+// ---- expressions ------------------------------------------------------------------------------
+
+fn g(name: Text): SynExpr {
+  ExVar(Syn::global(name))
+}
+
+fn call(name: Text, args: List(SynExpr), at: SynSpan): SynExpr {
+  ExApp(g(name), args, at)
+}
+
+fn v(id: SynIdent): SynExpr {
+  ExVar(id)
+}
+
+fn app(f: SynIdent, args: List(SynExpr), at: SynSpan): SynExpr {
+  ExApp(v(f), args, at)
+}
+
+fn some(e: SynExpr, at: SynSpan): SynExpr {
+  call("Some", Cons(e, Nil), at)
+}
+
+fn none(): SynExpr {
+  g("None")
+}
+
+fn iff(c: SynExpr, yes: SynExpr, no: SynExpr, at: SynSpan): SynExpr {
+  ExIf(c, yes, Some(no), at)
+}
+
+fn arm(p: SynPattern, body: SynExpr): SynArm {
+  SynArm { pattern: p, guard: None, goal: None, body: body }
+}
+
+fn mat(scrut: SynExpr, arms: List(SynArm), at: SynSpan): SynExpr {
+  ExMatch(scrut, None, arms, None, None, at)
+}
+
+fn pctor(name: Text, args: List(SynPattern)): SynPattern {
+  PtCtor(Syn::global(name), args)
+}
+
+fn lam(body: SynExpr, at: SynSpan): SynExpr {
+  ExLam(Nil, body, at)
+}
+
+fn let_in(id: SynIdent, value: SynExpr, body: SynExpr, at: SynSpan): SynExpr {
+  ExBlock(Cons(StLet(id, None, value, false, false, None, at), Cons(StExpr(body), Nil)), at)
+}
+
+fn record_fields(ss: List(Slot)): List(SynExpr × Text) {
+  List::map((s: Slot) => #(v(s.ident), s.name), ss)
+}
+
+fn record_pats(ss: List(Slot)): List(SynPattern × Text) {
+  List::map((s: Slot) => #(PtBind(s.ident, None), s.name), ss)
+}
+
+fn record_args(f: Flat, at: SynSpan): List(SynExpr) {
+  match f.slots {
+    Nil => Nil
+    Cons(s, rest) => Cons(ExRecord(f.record, record_fields(f.slots), at), Nil)
+  }
+}
+
+fn ctor_value(f: Flat, at: SynSpan): SynExpr {
+  match f.slots {
+    Nil => v(f.ctor)
+    Cons(s, rest) => app(f.ctor, record_args(f, at), at)
+  }
+}
+
+fn ctor_pat(f: Flat): SynPattern {
+  match f.slots {
+    Nil => PtCtor(f.ctor, Nil)
+    Cons(s, rest) => PtCtor(f.ctor, Cons(PtRecord(f.record, record_pats(f.slots)), Nil))
+  }
+}
+
+fn ctor_of(f: Flat, at: SynSpan): SynCtor {
+  match f.slots {
+    Nil => SynCtor { name: f.ctor, fields: Nil }
+    Cons(s, rest) => SynCtor {
+      name: f.ctor,
+      fields: Cons(#(None, ExApp(v(f.record), List::map((s: Slot) => s.ty, f.slots), at)), Nil)
+    }
+  }
+}
+
+// `trace, global_state` around `inner` is `trace(() => global_state(() => inner))`.
+fn wrap(names: List(SynToken), inner: SynExpr, at: SynSpan): SynExpr {
+  match names {
+    Nil => inner
+    Cons(n, rest) => app(Syn::ident(n), Cons(lam(wrap(rest, inner, at), at), Nil), at)
+  }
+}
+
+fn handler_call(verb: Verb, f: Flat, at: SynSpan): SynExpr {
+  app(verb.handler, record_args(f, at), at)
+}
+
+fn method_ctor(m: Text): Text {
+  if m == "get" { "Get" } else if m == "post" { "Post" } else if m == "put" { "Put" } else if m == "delete" { "Delete" } else if m == "patch" { "Patch" } else if m == "head" { "Head" } else { "Options" }
+}
+
+fn allow_piece(m: Text): Text {
+  if m == "get" { "GET" } else if m == "post" { "POST" } else if m == "put" { "PUT" } else if m == "delete" { "DELETE" } else if m == "patch" { "PATCH" } else if m == "head" { "HEAD" } else { "OPTIONS" }
+}
+
+fn allow_one(m: Text, on: Bool): Text {
+  if on { allow_piece(m) } else { "" }
+}
+
+fn join_allow(a: Text, b: Text): Text {
+  if a == "" { b } else if b == "" { a } else { concat(a, concat(", ", b)) }
+}
+
+fn allow_text(vs: List(Verb)): Text {
+  let head := has_method(vs, "head") || has_method(vs, "get")
+  join_allow(
+    allow_one("get", has_method(vs, "get")),
+    join_allow(
+      allow_one("post", has_method(vs, "post")),
+      join_allow(
+        allow_one("put", has_method(vs, "put")),
+        join_allow(
+          allow_one("delete", has_method(vs, "delete")),
+          join_allow(
+            allow_one("patch", has_method(vs, "patch")),
+            join_allow(allow_one("head", head), allow_one("options", has_method(vs, "options")))
+          )
+        )
+      )
+    )
+  )
+}
+
+fn find_verb(vs: List(Verb), m: Text): Option(Verb) {
+  match vs {
+    Nil => None
+    Cons(v, rest) => if v.method == m { Some(v) } else { find_verb(rest, m) }
+  }
+}
+
+fn has_method(vs: List(Verb), m: Text): Bool {
+  match find_verb(vs, m) {
+    Some(v) => true
+    None => false
+  }
+}
+
+fn covered(vs: List(Verb)): Bool {
+  has_method(
+    vs,
+    "get"
+  ) && has_method(
+    vs,
+    "post"
+  ) && has_method(
+    vs,
+    "put"
+  ) && has_method(vs, "delete") && has_method(vs, "patch") && has_method(vs, "options")
+}
+
+fn method_arms(f: Flat, at: SynSpan): List(SynArm) {
+  let base := List::map(
+    (verb: Verb) => arm(
+      pctor(concat("Method::", method_ctor(verb.method)), Nil),
+      handler_call(verb, f, at)
+    ),
+    f.verbs
+  )
+  // Without `head`, `GET` answers `HEAD`; the body is not sent.
+  let with_head := match find_verb(f.verbs, "head") {
+    Some(h) => base
+    None => match find_verb(f.verbs, "get") {
+      None => base
+      Some(get) => Cons(arm(pctor("Method::Head", Nil), handler_call(get, f, at)), base)
+    }
+  }
+  if covered(f.verbs) {
+    with_head
+  } else {
+    Syn::append(
+      with_head,
+      Cons(
+        arm(PtWild, call("method_not_allowed", Cons(ExText(allow_text(f.verbs), at), Nil), at)),
+        Nil
+      )
+    )
+  }
+}
+
+fn dispatch(f: Flat, req: SynIdent, at: SynSpan): SynExpr {
+  match find_verb(f.verbs, "any") {
+    Some(verb) => handler_call(verb, f, at)
+    None => mat(call("HttpRequest::method", Cons(v(req), Nil), at), method_arms(f, at), at)
+  }
+}
+
+// ---- `route` ----------------------------------------------------------------------------------
+
+// Reading a captured text as the type `ty`.
+fn read_as(ty: SynToken, raw: SynExpr, at: SynSpan): SynExpr {
+  if ty.text == "Text" {
+    call("path_text", Cons(raw, Nil), at)
+  } else if ty.text == "Nat" {
+    call("path_nat", Cons(raw, Nil), at)
+  } else if ty.text == "u64" {
+    call("path_u64", Cons(raw, Nil), at)
+  } else if ty.text == "i64" {
+    call("path_i64", Cons(raw, Nil), at)
+  } else {
+    app(Syn::decl_name(Syn::ident(ty), concat(ty.text, "::from_path")), Cons(raw, Nil), at)
+  }
+}
+
+// `Some(x) => then`, anything else is no match.
+fn read_into(read: SynExpr, x: SynIdent, then: SynExpr, at: SynSpan): SynExpr {
+  mat(
+    read,
+    Cons(
+      arm(pctor("Some", Cons(PtBind(x, None), Nil)), then),
+      Cons(arm(pctor("None", Nil), none()), Nil)
+    ),
+    at
+  )
+}
+
+fn seg_pat(ss: List(Seg), n: u64, at: SynSpan): SynPattern × List(SynIdent) {
+  match ss {
+    Nil => #(pctor("Nil", Nil), Nil)
+    Cons(s, rest) => {
+      let id := local(concat("seg", Text::of_u64(n)), at)
+      match seg_pat(rest, inc(n), at) {
+        #(pat, ids) => #(pctor("Cons", Cons(PtBind(id, None), Cons(pat, Nil))), Cons(id, ids))
+      }
+    }
+  }
+}
+
+fn check_segs(
+  ss: List(Seg),
+  ids: List(SynIdent),
+  qs: List(QItem),
+  success: SynExpr,
+  q: SynIdent,
+  at: SynSpan
+): SynExpr ! {macro_error, div} {
+  match #(ss, ids) {
+    #(Nil, Nil) => check_queries(qs, success, q, at)
+    #(Cons(Lit(lit), srest), Cons(id, irest)) => iff(
+      call("Text::eq", Cons(v(id), Cons(ExText(lit, at), Nil)), at),
+      check_segs(srest, irest, qs, success, q, at),
+      none(),
+      at
+    )
+    #(Cons(Param(name, ty), srest), Cons(id, irest)) => read_into(
+      read_as(ty, v(id), at),
+      local(name.text, name.span),
+      check_segs(srest, irest, qs, success, q, at),
+      at
+    )
+    #(Nil, Cons(id, irest)) => fail(at, "router: the path and its binders disagree")
+    #(Cons(seg, srest), Nil) => fail(at, "router: the path and its binders disagree")
+  }
+}
+
+fn check_queries(qs: List(QItem), success: SynExpr, q: SynIdent, at: SynSpan): SynExpr {
+  match qs {
+    Nil => success
+    Cons(item, rest) => {
+      let raw := local(concat(item.name.text, "_raw"), at)
+      let x := local(item.name.text, item.name.span)
+      let found := call("query_value", Cons(v(q), Cons(ExText(item.name.text, at), Nil)), at)
+      let more := check_queries(rest, success, q, at)
+      if item.optional {
+        // Absent is `None`; present and unreadable is no match.
+        let got := local(concat(item.name.text, "_got"), at)
+        mat(
+          found,
+          Cons(
+            arm(
+              pctor("Some", Cons(PtBind(raw, None), Nil)),
+              read_into(
+                read_as(item.ty, v(raw), at),
+                got,
+                let_in(x, some(v(got), at), more, at),
+                at
+              )
+            ),
+            Cons(arm(pctor("None", Nil), let_in(x, none(), more, at)), Nil)
+          ),
+          at
+        )
+      } else {
+        read_into(found, raw, read_into(read_as(item.ty, v(raw), at), x, more, at), at)
+      }
+    }
+  }
+}
+
+fn try_route(f: Flat, segs: SynIdent, q: SynIdent, at: SynSpan): SynExpr ! {macro_error, div} {
+  if f.catch_all {
+    some(ctor_value(f, at), at)
+  } else {
+    match seg_pat(f.segs, 0, at) {
+      #(pat, ids) => mat(
+        v(segs),
+        Cons(
+          arm(pat, check_segs(f.segs, ids, f.queries, some(ctor_value(f, at), at), q, at)),
+          Cons(arm(PtWild, none()), Nil)
+        ),
+        at
+      )
+    }
+  }
+}
+
+fn decide(
+  fs: List(Flat),
+  segs: SynIdent,
+  q: SynIdent,
+  at: SynSpan,
+  n: u64
+): SynExpr ! {macro_error, div} {
+  match fs {
+    Nil => fail(at, "router: write `/*`")
+    Cons(f, Nil) => ctor_value(f, at)
+    Cons(f, rest) => {
+      let picked := local(concat("picked", Text::of_u64(n)), at)
+      mat(
+        try_route(f, segs, q, at),
+        Cons(
+          arm(pctor("Some", Cons(PtBind(picked, None), Nil)), v(picked)),
+          Cons(arm(pctor("None", Nil), decide(rest, segs, q, at, inc(n))), Nil)
+        ),
+        at
+      )
+    }
+  }
+}
+
+fn any_query(fs: List(Flat)): Bool {
+  match fs {
+    Nil => false
+    Cons(f, rest) => match f.queries {
+      Nil => any_query(rest)
+      Cons(q, more) => true
+    }
+  }
+}
+
+fn route_expr(fs: List(Flat), req: SynIdent, at: SynSpan): SynExpr ! {macro_error, div} {
+  let segs := local("segs", at)
+  let q := local("query", at)
+  let_in(
+    segs,
+    call("segments", Cons(call("HttpRequest::path", Cons(v(req), Nil), at), Nil), at),
+    if any_query(fs) {
+      let_in(q, call("HttpRequest::query", Cons(v(req), Nil), at), decide(fs, segs, q, at, 0), at)
+    } else {
+      decide(fs, segs, q, at, 0)
+    },
+    at
+  )
+}
+
+// ---- `handler` --------------------------------------------------------------------------------
+
+fn handler_expr(fs: List(Flat), req: SynIdent, route: SynIdent, at: SynSpan): SynExpr {
+  let arms := List::map(
+    (f: Flat) => arm(ctor_pat(f), wrap(f.middleware, dispatch(f, req, f.span), f.span)),
+    fs
+  )
+  call("answer_request", Cons(v(req), Cons(lam(mat(v(route), arms, at), at), Nil)), at)
+}
+
+fn fn_of(
+  name: SynIdent,
+  params: List(SynIdent),
+  bs: List(Option(Bool)),
+  types: List(Option(SynExpr)),
+  result: SynExpr,
+  effects: Option(List(SynRowEntry)),
+  body: SynExpr
+): SynFn {
+  SynFn {
+    name: name,
+    generics: Nil,
+    generic_types: Nil,
+    bounds: Nil,
+    params: params,
+    r#borrows: bs,
+    param_types: types,
+    result: Some(result),
+    effects: effects,
+    where_: Nil,
+    body: body,
+    span: name.span,
+    unused: None,
+    unused_generics: Nil,
+    unused_params: Nil
+  }
+}
+
+fn emit(
+  model: SynIdent,
+  row: List(SynRowEntry),
+  fs: List(Flat),
+  at: SynSpan
+): List(SynStmt) ! {macro_error, div} {
+  let req := local("request", at)
+  let route := local("route", at)
+  let route_ty := v(model)
+  [
+    StEnum(SynData {
+      kind: Some("shared"),
+      name: model,
+      generics: Nil,
+      ctors: List::map((f: Flat) => ctor_of(f, at), fs),
+      span: at,
+      unused_generics: Nil
+    }),
+    StFn(fn_of(
+      Syn::decl_name(model, "route"),
+      [req],
+      [Some(false)],
+      [Some(quote { HttpRequest })],
+      route_ty,
+      None,
+      route_expr(fs, req, at)
+    )),
+    StFn(fn_of(
+      Syn::decl_name(model, "handler"),
+      [req, route],
+      [None, None],
+      [Some(quote { HttpRequest }), Some(route_ty)],
+      quote { Response },
+      Some(row),
+      handler_expr(fs, req, route, at)
+    ))
+  ]
+}
+
+pub macro fn router(spec: router_syntax::Router): List(SynStmt) ! {macro_error, div} {
+  let model := Syn::decl_name(Syn::ident(spec.name), spec.name.text)
+  let fs := lower_all(spec.entry, Nil, middleware_of(spec.entry), model, false)
+  check_names(fs, Nil)
+  check_tail(fs)
+  emit(model, row_of(spec.row), fs, spec.span)
+}

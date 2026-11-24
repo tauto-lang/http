@@ -1,0 +1,246 @@
+import "layer.taut" { Layer }
+import "service.taut" { Outcome, Service, service_call }
+import "middleware.taut" { outcome_map }
+
+// Rate limit: the layer keeps a number of tokens next to the service's state.
+// A request takes one token and goes to the service; with no token left it is
+// refused as `overloaded` and the service is not called. `refill` puts the
+// tokens back, so calling it once per period allows `n` requests per period.
+
+pub(open) inductive Limited(E: Type): Type {
+  Overloaded: Limited(E)
+  Inner(e: E): Limited(E)
+}
+
+fn limited_inner<S, Res, E>(
+  t: Nat,
+  p: @outcome Outcome(Res, E) × @state S
+): @outcome Outcome(Res, Limited(E)) × @state (@tokens Nat × @state S) {
+  match p {
+    #(@outcome o, @state s) => #(
+      @outcome outcome_map((x: Res) => x, (e: E) => Inner(e), o),
+      @state #(@tokens t, @state s)
+    )
+  }
+}
+
+fn rate_limit_step<S, Req, Res, E>(
+  svc: Service(S, Req, Res, E),
+  st: @tokens Nat × @state S,
+  r: Req
+): @outcome Outcome(Res, Limited(E)) × @state (@tokens Nat × @state S) {
+  match st {
+    #(@tokens n, @state s) => ⊢ @outcome Outcome(
+      Res,
+      Limited(E)
+    ) × @state (@tokens Nat × @state S) from match n {
+      Zero => #(
+        @outcome Outcome::Err(<Res: Res, E: Limited(E)>, Overloaded),
+        @state #(@tokens Zero, @state s)
+      )
+      Succ(t) => limited_inner(t, service_call(svc, s, r))
+    }
+  }
+}
+
+pub fn rate_limit<S, Req, Res, E>(): Layer(
+  Service(S, Req, Res, E),
+  Service(@tokens Nat × @state S, Req, Res, Limited(E))
+) {
+  Layer::Mk(
+    (svc: Service(S, Req, Res, E)) => Service::Mk(
+      (st: @tokens Nat × @state S, r: Req) => rate_limit_step(svc, st, r)
+    )
+  )
+}
+
+// The start of a period: `n` tokens again.
+pub fn refill<S>(n: Nat, st: @tokens Nat × @state S): @tokens Nat × @state S {
+  match st {
+    #(@tokens t, @state s) => #(@tokens n, @state s)
+  }
+}
+
+fn tokens<S>(st: @tokens Nat × @state S): Nat {
+  match st {
+    #(t, s) => t
+  }
+}
+
+// The state a limited service leaves.
+fn limited_state<O, S>(p: @outcome O × @state (@tokens Nat × @state S)): @tokens Nat × @state S {
+  match p {
+    #(o, st) => st
+  }
+}
+
+// The state at the end of `run_all`.
+pub fn run_state<O, T>(p: @outcomes O × @state T): T {
+  match p {
+    #(os, st) => st
+  }
+}
+
+// The answers `run_all` gave.
+pub fn outcomes_of<O, T>(p: @outcomes List(O) × @state T): List(O) {
+  match p {
+    #(os, st) => os
+  }
+}
+
+// One token fewer after an admitted request, whatever the service answers.
+theorem limited_inner_tokens<S: Type, Res: Type, E: Type>(
+  t: Nat,
+  p: @outcome Outcome(Res, E) × @state S
+): tokens(limited_state(limited_inner(t, p))) = t {
+  match p {
+    #(@outcome o, @state s) => Refl
+  }
+}
+
+theorem rate_limit_takes_one<S: Type, Req: Type, Res: Type, E: Type>(
+  svc: Service(S, Req, Res, E),
+  t: Nat,
+  s: S,
+  r: Req
+): tokens(
+  limited_state(service_call(Layer::apply(rate_limit(), svc), #(@tokens Succ(t), @state s), r))
+) = t {
+  limited_inner_tokens(t, service_call(svc, s, r))
+}
+
+// With no token, a request is refused, and neither the tokens nor the service's state change.
+theorem rate_limit_empty<S: Type, Req: Type, Res: Type, E: Type>(
+  svc: Service(S, Req, Res, E),
+  s: S,
+  r: Req
+): service_call(
+  Layer::apply(rate_limit(), svc),
+  #(@tokens Zero, @state s),
+  r
+) = #(
+  @outcome Outcome::Err(<Res: Res, E: Limited(E)>, Overloaded),
+  @state #(@tokens Zero, @state s)
+) {
+  Refl
+}
+
+// ---- running requests in order ---------------------------------------------
+
+fn run_prepend<O: Shared, S: Shared>(
+  o: O,
+  rest: @outcomes List(O) × @state S
+): @outcomes List(O) × @state S {
+  #(@outcomes Cons(o, outcomes_of(rest)), @state run_state(rest))
+}
+
+fn run_with<O: Shared, S: Shared>(
+  p: @outcome O × @state S,
+  k: (S) -> @outcomes List(O) × @state S
+): @outcomes List(O) × @state S {
+  match p {
+    #(@outcome o, @state s) => run_prepend(o, k(s))
+  }
+}
+
+// The answers to `reqs`, called one after another, and the state at the end.
+pub fn run_all<S: Shared, Req, Res: Shared, E: Shared>(
+  svc: Service(S, Req, Res, E),
+  reqs: List(Req),
+  s: S
+): @outcomes List(Outcome(Res, E)) × @state S {
+  match reqs {
+    Nil => #(@outcomes Nil, @state s)
+    Cons(r, rest) => match service_call(svc, s, r) {
+      #(@outcome o, @state s1) => run_prepend(o, run_all(svc, rest, s1))
+    }
+  }
+}
+
+// ---- at most `n` admitted requests between refills -------------------------
+
+fn spire_add(a: Nat, b: Nat): Nat {
+  match a {
+    Zero => b
+    Succ(k) => Succ(spire_add(k, b))
+  }
+}
+
+// How many answers the service gave itself, a response or its own error.
+fn admitted<Res, E>(os: List(Outcome(Res, Limited(E)))): Nat {
+  match os {
+    Nil => Zero
+    Cons(o, rest) => ⊢ Nat from match o {
+      Outcome::Ok(x) => Succ(admitted(rest))
+      Outcome::Err(e) => ⊢ Nat from match e {
+        Overloaded => admitted(rest)
+        Inner(e2) => Succ(admitted(rest))
+      }
+    }
+  }
+}
+
+theorem rate_limit_admitted_step<S: Type, Res: Type, E: Type>(
+  t: Nat,
+  q: @outcome Outcome(Res, E) × @state S,
+  k: (@tokens Nat × @state S) -> @outcomes List(
+    Outcome(Res, Limited(E))
+  ) × @state (@tokens Nat × @state S),
+  ih: ∀ s2: S. (
+    spire_add(
+      admitted(outcomes_of(k(#(@tokens t, @state s2)))),
+      tokens(run_state(k(#(@tokens t, @state s2))))
+    ) = t
+  )
+): spire_add(
+  admitted(outcomes_of(run_with(limited_inner(t, q), k))),
+  tokens(run_state(run_with(limited_inner(t, q), k)))
+) = Succ(t) {
+  ⊢ spire_add(
+    admitted(outcomes_of(run_with(limited_inner(t, q), k))),
+    tokens(run_state(run_with(limited_inner(t, q), k)))
+  ) = Succ(t) from match q {
+    #(@outcome o, @state s) => ⊢ spire_add(
+      admitted(outcomes_of(run_with(limited_inner(t, #(@outcome o, @state s)), k))),
+      tokens(run_state(run_with(limited_inner(t, #(@outcome o, @state s)), k)))
+    ) = Succ(t) from match o {
+      Outcome::Ok(x) => Eq::congr(Succ, ih(s))
+      Outcome::Err(e) => Eq::congr(Succ, ih(s))
+    }
+  }
+}
+
+// Starting with `n` tokens, the admitted requests and the tokens left add up
+// to `n`: however many requests come, at most `n` reach the service.
+pub theorem rate_limit_budget<S: Type, Req: Type, Res: Type, E: Type>(
+  svc: Service(S, Req, Res, E),
+  reqs: List(Req),
+  n: Nat,
+  s: S
+): spire_add(
+  admitted(outcomes_of(run_all(Layer::apply(rate_limit(), svc), reqs, #(@tokens n, @state s)))),
+  tokens(run_state(run_all(Layer::apply(rate_limit(), svc), reqs, #(@tokens n, @state s))))
+) = n {
+  ⊢ spire_add(
+    admitted(outcomes_of(run_all(Layer::apply(rate_limit(), svc), reqs, #(@tokens n, @state s)))),
+    tokens(run_state(run_all(Layer::apply(rate_limit(), svc), reqs, #(@tokens n, @state s))))
+  ) = n from match reqs {
+    Nil => Refl
+    Cons(r, rest) => ⊢ spire_add(
+      admitted(
+        outcomes_of(run_all(Layer::apply(rate_limit(), svc), Cons(r, rest), #(@tokens n, @state s)))
+      ),
+      tokens(
+        run_state(run_all(Layer::apply(rate_limit(), svc), Cons(r, rest), #(@tokens n, @state s)))
+      )
+    ) = n from match n {
+      Zero => rate_limit_budget(svc, rest, Zero, s)
+      Succ(t) => rate_limit_admitted_step(
+        t,
+        service_call(svc, s, r),
+        (st: @tokens Nat × @state S) => run_all(Layer::apply(rate_limit(), svc), rest, st),
+        (s2: S) => rate_limit_budget(svc, rest, t, s2)
+      )
+    }
+  }
+}

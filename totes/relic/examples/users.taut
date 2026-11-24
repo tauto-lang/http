@@ -1,0 +1,98 @@
+import "../../http/src/status.taut" { Status }
+import "../src/app.taut" { render }
+import "../src/effects.taut" { get_headers }
+import "../src/response.taut" { Response, text_response }
+import "../src/router.taut" { router }
+
+// A user id is any segment that is not empty. A type is read from a path segment by its
+// `from_path`, written next to it as here; a type of another package is wrapped in a
+// newtype like this one to give it one.
+struct UserId { raw: Text }
+
+fn UserId::from_path(segment: Text): Option(UserId) {
+  if segment == "" { None } else { Some(UserId { raw: segment }) }
+}
+
+// Who may administer users. A handler that needs it performs `admin()`;
+// the `auth` middleware answers it, and only then reads `authorization`.
+struct Admin { token: Text }
+
+effect admin(): Admin
+
+fn bearer(v: Text): Option(Text) {
+  if Text::slice(
+    v,
+    0,
+    7
+  ) == Some("Bearer ") && Text::len(v) > 7 { Text::slice(v, 7, Text::len(v)) } else { None }
+}
+
+fn auth<!e>(k: () -> Response ! {admin} ∪ e): Response ! {get_headers} ∪ e {
+  handle { k() } with {
+    admin(), cont => match perform get_headers("authorization") {
+      None => text_response(Status::unauthorized(), "unauthorized")
+      Some(v) => match bearer(v) {
+        None => text_response(Status::forbidden(), "forbidden")
+        Some(t) => cont(Admin { token: t })
+      }
+    }
+  }
+}
+
+fn trace<!e>(k: () -> Response ! e): Response ! e {
+  k()
+}
+
+fn global_state<!e>(k: () -> Response ! e): Response ! e {
+  k()
+}
+
+fn user_db<!e>(k: () -> Response ! e): Response ! e {
+  k()
+}
+
+fn home(): Response {
+  text_response(Status::ok(), "home")
+}
+
+fn healthz(): Response {
+  text_response(Status::ok(), "ok")
+}
+
+fn users(): Response {
+  text_response(Status::ok(), "ada\nbea")
+}
+
+fn create(): Response ! {admin} {
+  let a := perform admin()
+  text_response(Status::created(), concat("created by ", a.token))
+}
+
+fn user(u: { user_id: UserId }): Response {
+  text_response(Status::ok(), u.user_id.raw)
+}
+
+fn remove(u: { user_id: UserId }): Response ! {admin} {
+  let a := perform admin()
+  text_response(Status::ok(), concat(u.user_id.raw, concat(" removed by ", a.token)))
+}
+
+fn missing(): Response {
+  text_response(Status::not_found(), "not found")
+}
+
+router!(```
+  Route ! {}
+  middleware: trace, global_state, auth
+  / Home get: home
+  /healthz Healthz get: healthz
+  /users Users get: users post: create {
+    middleware: user_db
+    /{user_id: UserId} User get: user delete: remove
+  }
+  /* NotFound any: missing
+  ```) => enum Route, fn route, fn handler
+
+pub fn users_answer(raw: Text): Text {
+  render(raw, route, handler)
+}

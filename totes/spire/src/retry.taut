@@ -1,0 +1,119 @@
+import "service.taut" { Outcome, Service, service_call }
+import "layer.taut" { Layer }
+
+// Retry: on an error that `should` accepts, call the service again with the
+// state the failed call left, at most `n` more times. The first answer that
+// is a response, or the last error, is the result.
+
+// `stop` on `false`, `go` on `true`.
+fn yn_pick<A>(y: Bool, stop: A, go: A): A {
+  match y { false => stop, true => go }
+}
+
+theorem yn_pick_no<A: Type>(y: Bool, stop: A, go: A, h: y = false): yn_pick(y, stop, go) = stop {
+  Eq::subst((z: Bool) => yn_pick(<A: A>, z, stop, go) = stop, Eq::sym(h), Refl)
+}
+
+// What to do with the answer of one attempt, `left` attempts still allowed.
+fn retry_after<S: Shared, Req: Shared, Res, E: Shared>(
+  svc: Service(S, Req, Res, E),
+  should: (Req, E) -> Bool,
+  left: Nat,
+  r: Req,
+  p: @outcome Outcome(Res, E) × @state S
+): @outcome Outcome(Res, E) × @state S {
+  match left {
+    Zero => p
+    Succ(m) => ⊢ @outcome Outcome(Res, E) × @state S from match p {
+      #(@outcome o, @state s) => ⊢ @outcome Outcome(Res, E) × @state S from match o {
+        Outcome::Ok(x) => #(@outcome Outcome::Ok(<Res: Res, E: E>, x), @state s)
+        Outcome::Err(e) => yn_pick(
+          should(r, e),
+          #(@outcome Outcome::Err(<Res: Res, E: E>, e), @state s),
+          retry_after(svc, should, m, r, service_call(svc, s, r))
+        )
+      }
+    }
+  }
+}
+
+pub fn retry<S: Shared, Req: Shared, Res, E: Shared>(
+  should: (Req, E) -> Bool,
+  n: Nat
+): Layer(Service(S, Req, Res, E), Service(S, Req, Res, E)) {
+  Layer::Mk(
+    (svc: Service(S, Req, Res, E)) => Service::Mk(
+      (s: S, r: Req) => retry_after(svc, should, n, r, service_call(svc, s, r))
+    )
+  )
+}
+
+// No retries is the service itself.
+pub theorem retry_zero<S: Type, Req: Type, Res: Type, E: Type>(
+  should: (Req, E) -> Bool,
+  svc: Service(S, Req, Res, E),
+  s: S,
+  r: Req
+): service_call(Layer::apply(retry(should, Zero), svc), s, r) = service_call(svc, s, r) {
+  Refl
+}
+
+// A response is never retried.
+pub theorem retry_after_ok<S: Type, Req: Type, Res: Type, E: Type>(
+  svc: Service(S, Req, Res, E),
+  should: (Req, E) -> Bool,
+  n: Nat,
+  r: Req,
+  x: Res,
+  s: S
+): retry_after(
+  svc,
+  should,
+  n,
+  r,
+  #(@outcome Outcome::Ok(<Res: Res, E: E>, x), @state s)
+) = #(@outcome Outcome::Ok(<Res: Res, E: E>, x), @state s) {
+  ⊢ retry_after(
+    svc,
+    should,
+    n,
+    r,
+    #(@outcome Outcome::Ok(<Res: Res, E: E>, x), @state s)
+  ) = #(@outcome Outcome::Ok(<Res: Res, E: E>, x), @state s) from match n {
+    Zero => Refl
+    Succ(m) => Refl
+  }
+}
+
+// An error `should` refuses is never retried.
+pub theorem retry_after_refused<S: Type, Req: Type, Res: Type, E: Type>(
+  svc: Service(S, Req, Res, E),
+  should: (Req, E) -> Bool,
+  n: Nat,
+  r: Req,
+  e: E,
+  s: S,
+  h: should(r, e) = false
+): retry_after(
+  svc,
+  should,
+  n,
+  r,
+  #(@outcome Outcome::Err(<Res: Res, E: E>, e), @state s)
+) = #(@outcome Outcome::Err(<Res: Res, E: E>, e), @state s) {
+  ⊢ retry_after(
+    svc,
+    should,
+    n,
+    r,
+    #(@outcome Outcome::Err(<Res: Res, E: E>, e), @state s)
+  ) = #(@outcome Outcome::Err(<Res: Res, E: E>, e), @state s) from match n {
+    Zero => Refl
+    Succ(m) => yn_pick_no(
+      should(r, e),
+      #(@outcome Outcome::Err(<Res: Res, E: E>, e), @state s),
+      retry_after(svc, should, m, r, service_call(svc, s, r)),
+      h
+    )
+  }
+}

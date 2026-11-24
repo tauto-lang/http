@@ -1,0 +1,12 @@
+package {
+  name = "http"
+  version = "0.1.0"
+}
+
+dependencies {
+  url {
+    git = "https://github.com/Hihaheho/tauto.git"
+    ref = "refs/heads/main"
+    dir = "totes/url"
+  }
+}

@@ -1,0 +1,37 @@
+import "../../src/binary.taut" { BinaryResponse, binary_request, binary_wire }
+let payload := Bytes::of_list([U8::of_u64(0), U8::of_u64(255), U8::of_u64(128)])
+let response := BinaryResponse { status: 200, content_type: "application/wasm", body: payload }
+let head := binary_wire(response, true)
+let full := binary_wire(response, false)
+perform test("binary body is preserved exactly",() => {
+  expect(match Bytes::slice(full,Bytes::len(head),Bytes::len(full)) { Some(b) => Bytes::eq(b,payload), None => false },"binary bytes changed")
+})
+perform test("HEAD has the same headers and no body",() => {
+  expect(match Bytes::slice(full,0,Bytes::len(head)) { Some(b) => Bytes::eq(b,head), None => false },"HEAD differs from GET headers")
+})
+perform test("header injection is rejected",() => {
+  let bad := binary_wire(BinaryResponse { status: 200, content_type: "text/plain\r\nx-injected: yes", body: payload },false)
+  expect(Text::of_bytes(bad) != None,"error must be plain text")
+  expect(not(Bytes::eq(bad,full)),"unsafe response was sent")
+  expect(match Text::of_bytes(bad) { Some(t) => t == "HTTP/1.1 500 Internal Server Error\r\ncontent-type: text/plain\r\ncontent-length: 23\r\nconnection: close\r\nx-content-type-options: nosniff\r\n\r\nInvalid response header", None => false },"the injected content type must give the plain 500 response")
+})
+perform test("incomplete and unsupported request lines fail",() => {
+  expect(match binary_request("GET / HTTP/1.1\r\n") { None => true, _ => false },"accepted incomplete head")
+  expect(match binary_request("GET / HTTP/9.9\r\n\r\n") { None => true, _ => false },"accepted unsupported version")
+})
+import std::text_ops { Text }
+fn status_head(status: u64, body: Bytes): Text ! {div} {
+  match Text::of_bytes(
+    binary_wire(BinaryResponse { status: status, content_type: "text/plain", body: body }, true)
+  ) {
+    Some(t) => t
+    None => ""
+  }
+}
+perform test("every status has its reason phrase",() => {
+  expect(Text::starts_with(status_head(201, payload), "HTTP/1.1 201 Created\r\n"),"201 must be Created")
+  expect(Text::starts_with(status_head(400, payload), "HTTP/1.1 400 Bad Request\r\n"),"400 must be Bad Request")
+  expect(Text::starts_with(status_head(413, payload), "HTTP/1.1 413 Content Too Large\r\n"),"413 must be Content Too Large")
+  expect(Text::starts_with(status_head(500, payload), "HTTP/1.1 500 Internal Server Error\r\n"),"500 must be Internal Server Error")
+  expect(Text::starts_with(status_head(999, payload), "HTTP/1.1 999 \r\n"),"a status without a reason phrase has an empty one")
+})

@@ -1,0 +1,21 @@
+import std::builtin::os { Host }
+import std::builtin::par { spawn }
+import "../../http/src/http.taut" { HttpRequest }
+import "conn.taut" { ServeIo, TaskIo, serve_response }
+import "response.taut" { Response }
+
+// Listen, and answer each request with `pick` then `answer`. `pick` is the
+// pure route; `answer` is the effectful handler, whose row `h` is a part of
+// `Host` that `serve` adds to its own: the row is what the server and the
+// handler ask of the host, nothing else. At most `connection_limit()`
+// connections are served at once.
+pub fn serve<R: Shared, !h: Host>(
+  address: Text,
+  pick: (&HttpRequest) -> R,
+  answer: (HttpRequest, R) -> Response ! h
+): Unit ! {ServeIo, ∀ T. spawn(() -> T ! {TaskIo} ∪ h)} ∪ h {
+  serve_response(address, (r: HttpRequest) => {
+    let route := pick(&r)
+    answer(r, route)
+  })
+}

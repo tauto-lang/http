@@ -1,0 +1,623 @@
+import std::base { Bool, List, Nat }
+import std::list { List }
+import std::text { Text }
+import std::text_ops { Bytes }
+
+// Byte lists: the scanners the HTTP reader is made of, and the laws that make
+// reading what was printed give it back.
+
+// Whether `c` is absent from `l`.
+pub fn no_byte(c: Nat, l: List(Nat)): Bool {
+  match l {
+    Nil => true
+    Cons(h, t) => not(Nat::eq(h, c)) && no_byte(c, t)
+  }
+}
+
+pub theorem no_byte_cons_and(
+  x: Bool,
+  p: Bool,
+  q: Bool,
+  r: Bool,
+  e: r = (p && q)
+): Bool::and(not(x), r) = (not(x) && p && q) {
+  match x { true => Refl, false => e }
+}
+
+pub theorem no_byte_append(
+  c: Nat,
+  a: List(Nat),
+  b: List(Nat)
+): no_byte(c, List::append(a, b)) = (no_byte(c, a) && no_byte(c, b)) {
+  match a {
+    Nil => Refl
+    Cons(h, t) => no_byte_cons_and(
+      Nat::eq(h, c),
+      no_byte(c, t),
+      no_byte(c, b),
+      no_byte(c, List::append(t, b)),
+      no_byte_append(c, t, b)
+    )
+  }
+}
+
+// From `(p && q) = true`, each side.
+pub theorem yes_left(p: Bool, q: Bool, e: Bool::and(p, q) = true): p = true {
+  And::left(Bool::and_split(p, q, e))
+}
+
+pub theorem yes_right(p: Bool, q: Bool, e: Bool::and(p, q) = true): q = true {
+  And::right(Bool::and_split(p, q, e))
+}
+
+// The first byte of a list without `c` is not `c`.
+pub theorem no_byte_head(
+  c: Nat,
+  h: Nat,
+  t: List(Nat),
+  e: no_byte(c, Cons(h, t)) = true
+): Nat::eq(h, c) = false {
+  Bool::not_true(Nat::eq(h, c), yes_left(not(Nat::eq(h, c)), no_byte(c, t), e))
+}
+
+pub theorem no_byte_tail(
+  c: Nat,
+  h: Nat,
+  t: List(Nat),
+  e: no_byte(c, Cons(h, t)) = true
+): no_byte(c, t) = true {
+  yes_right(not(Nat::eq(h, c)), no_byte(c, t), e)
+}
+
+// Both halves of an appended list lack `c`.
+pub theorem no_byte_split(
+  c: Nat,
+  a: List(Nat),
+  b: List(Nat),
+  e: no_byte(c, List::append(a, b)) = true
+): no_byte(c, a) = true ∧ no_byte(c, b) = true {
+  Bool::and_split(no_byte(c, a), no_byte(c, b), Eq::trans(Eq::sym(no_byte_append(c, a, b)), e))
+}
+
+// ---- prefixes -----------------------------------------------------------------------
+
+pub fn strip_prefix_step(y: Bool, rest: Option(List(Nat))): Option(List(Nat)) {
+  match y { true => rest, false => None }
+}
+
+// What follows `p` at the start of `l`, if `l` starts with `p`.
+pub fn strip_prefix(p: List(Nat), l: List(Nat)): Option(List(Nat)) {
+  match p {
+    Nil => Some(l)
+    Cons(a, ps) => ⊢ Option(List(Nat)) from match l {
+      Nil => None
+      Cons(b, t) => ⊢ Option(List(Nat)) from match Nat::eq(a, b) {
+        true => strip_prefix(ps, t)
+        false => None
+      }
+    }
+  }
+}
+
+pub theorem strip_prefix_append(
+  p: List(Nat),
+  r: List(Nat)
+): strip_prefix(p, List::append(p, r)) = Some(r) {
+  match p {
+    Nil => Refl
+    Cons(a, ps) => Eq::trans(
+      Eq::congr(⟦strip_prefix_step(□, strip_prefix(ps, List::append(ps, r)))⟧, Nat::eq_refl(a)),
+      strip_prefix_append(ps, r)
+    )
+  }
+}
+
+// ---- scanning up to a byte -----------------------------------------------------------
+
+pub fn cons_fst(
+  h: Nat,
+  p: @before List(Nat) × @after List(Nat)
+): @before List(Nat) × @after List(Nat) {
+  match p {
+    #(@before b, @after a) => #(@before Cons(h, b), @after a)
+  }
+}
+
+pub fn take_until_step(
+  y: Bool,
+  h: Nat,
+  t: List(Nat),
+  rest: @before List(Nat) × @after List(Nat)
+): @before List(Nat) × @after List(Nat) {
+  match y {
+    true => #(@before Nil, @after Cons(h, t))
+    false => cons_fst(h, rest)
+  }
+}
+
+// The bytes before the first `c`, and the rest from that `c` on.
+pub fn take_until(c: Nat, l: List(Nat)): @before List(Nat) × @after List(Nat) {
+  match l {
+    Nil => #(@before Nil, @after Nil)
+    // `take_until_step(Nat::eq(h, c), h, t, take_until(c, t))`, written out so that a
+    // program stops at the first `c`.
+    Cons(h, t) => ⊢ @before List(Nat) × @after List(Nat) from match Nat::eq(h, c) {
+      true => #(@before Nil, @after Cons(h, t))
+      false => cons_fst(h, take_until(c, t))
+    }
+  }
+}
+
+pub theorem take_until_append(
+  c: Nat,
+  xs: List(Nat),
+  r: List(Nat),
+  e: no_byte(c, xs) = true
+): take_until(c, List::append(xs, Cons(c, r))) = #(@before xs, @after Cons(c, r)) {
+  match xs {
+    Nil => Eq::congr(⟦take_until_step(□, c, r, take_until(c, r))⟧, Nat::eq_refl(c))
+    Cons(h, t) => Eq::trans(
+      Eq::congr(
+        ⟦take_until_step(
+          □,
+          h,
+          List::append(t, Cons(c, r)),
+          take_until(c, List::append(t, Cons(c, r)))
+        )⟧,
+        no_byte_head(c, h, t, e)
+      ),
+      Eq::congr(⟦cons_fst(h, □)⟧, take_until_append(c, t, r, no_byte_tail(c, h, t, e)))
+    )
+  }
+}
+
+// Without any `c`, everything is before it.
+pub theorem take_until_none(
+  c: Nat,
+  xs: List(Nat),
+  e: no_byte(c, xs) = true
+): take_until(c, xs) = #(@before xs, @after List::Nil(<A: Nat>)) {
+  match xs {
+    Nil => Refl
+    Cons(h, t) => Eq::trans(
+      Eq::congr(⟦take_until_step(□, h, t, take_until(c, t))⟧, no_byte_head(c, h, t, e)),
+      Eq::congr(⟦cons_fst(h, □)⟧, take_until_none(c, t, no_byte_tail(c, h, t, e)))
+    )
+  }
+}
+
+// ---- a trailing carriage return ------------------------------------------------------
+
+pub fn cons_some(h: Nat, o: Option(List(Nat))): Option(List(Nat)) {
+  match o {
+    None => None
+    Some(t) => Some(Cons(h, t))
+  }
+}
+
+pub fn strip_cr_last(y: Bool): Option(List(Nat)) {
+  match y {
+    true => Some(Nil)
+    false => None
+  }
+}
+
+pub fn strip_cr_cons(h: Nat, t: List(Nat), rest: Option(List(Nat))): Option(List(Nat)) {
+  match t {
+    Nil => strip_cr_last(Nat::eq(h, 13))
+    Cons(h2, t2) => cons_some(h, rest)
+  }
+}
+
+// `l` without its last byte, if that byte is a carriage return (13).
+pub fn strip_cr(l: List(Nat)): Option(List(Nat)) {
+  match l {
+    Nil => None
+    Cons(h, t) => strip_cr_cons(h, t, strip_cr(t))
+  }
+}
+
+pub theorem strip_cr_cons_some(
+  h: Nat,
+  t: List(Nat)
+): strip_cr_cons(h, List::append(t, Cons(13, Nil)), Some(t)) = Some(Cons(h, t)) {
+  match t {
+    Nil => Refl
+    Cons(h2, t2) => Refl
+  }
+}
+
+pub theorem strip_cr_append(v: List(Nat)): strip_cr(List::append(v, Cons(13, Nil))) = Some(v) {
+  match v {
+    Nil => Refl
+    Cons(h, t) => Eq::trans(
+      Eq::congr(⟦strip_cr_cons(h, List::append(t, Cons(13, Nil)), □)⟧, strip_cr_append(t)),
+      strip_cr_cons_some(h, t)
+    )
+  }
+}
+
+// ---- lines ---------------------------------------------------------------------------
+
+pub fn pair_lines(p: List(List(Nat)) × List(Nat)): List(List(Nat)) {
+  match p {
+    #(snd, fst) => Cons(fst, snd)
+  }
+}
+
+// The pieces of `l` between line feeds (10); there is always at least one.
+pub fn lines(l: List(Nat)): List(List(Nat)) {
+  pair_lines(Bytes::split(l, 10))
+}
+
+// The pieces with a line feed between each two.
+pub fn unlines(ls: List(List(Nat))): List(Nat) {
+  match ls {
+    Nil => Nil
+    Cons(p, ps) => List::append(p, Bytes::join_rest(Cons(10, Nil), ps))
+  }
+}
+
+pub theorem unlines_pair(
+  p: List(List(Nat)) × List(Nat)
+): unlines(pair_lines(p)) = Bytes::unsplit(Cons(10, Nil), p) {
+  match p {
+    #(snd, fst) => Refl
+  }
+}
+
+pub theorem unlines_lines(l: List(Nat)): unlines(lines(l)) = l {
+  Eq::trans(unlines_pair(Bytes::split(l, 10)), Bytes::split_unsplit(l, 10))
+}
+
+pub fn split_pair(xs: List(Nat), p: List(List(Nat)) × List(Nat)): List(List(Nat)) × List(Nat) {
+  match p {
+    #(snd, fst) => #(Cons(fst, snd), xs)
+  }
+}
+
+pub fn split_cons(h: Nat, p: List(List(Nat)) × List(Nat)): List(List(Nat)) × List(Nat) {
+  match p {
+    #(snd, fst) => #(snd, Cons(h, fst))
+  }
+}
+
+pub fn split_pick(
+  y: Bool,
+  h: Nat,
+  cur: List(Nat),
+  rest: List(List(Nat))
+): List(List(Nat)) × List(Nat) {
+  match y {
+    true => #(Cons(cur, rest), Nil)
+    false => #(rest, Cons(h, cur))
+  }
+}
+
+pub theorem split_step_no(
+  h: Nat,
+  c: Nat,
+  p: List(List(Nat)) × List(Nat),
+  e: Nat::eq(h, c) = false
+): Bytes::split_step(h, c, p) = split_cons(h, p) {
+  match p {
+    #(snd, fst) => match Nat::eq(h, c) eqn e2 {
+      false => Refl
+      true => False::elim(false_ne_true(Eq::trans(Eq::sym(e), e2)))
+    }
+  }
+}
+
+pub theorem split_cons_pair(
+  h: Nat,
+  xs: List(Nat),
+  p: List(List(Nat)) × List(Nat)
+): split_cons(h, split_pair(xs, p)) = split_pair(Cons(h, xs), p) {
+  match p {
+    #(snd, fst) => Refl
+  }
+}
+
+pub theorem split_step_sep(
+  c: Nat,
+  p: List(List(Nat)) × List(Nat)
+): Bytes::split_step(c, c, p) = split_pair(Nil, p) {
+  match p {
+    #(snd, fst) => match Nat::eq(c, c) eqn e2 {
+      false => False::elim(true_ne_false(Eq::trans(Eq::sym(Nat::eq_refl(c)), e2)))
+      true => Refl
+    }
+  }
+}
+
+// Splitting on `c` after a piece without `c` gives that piece first.
+pub theorem split_append(
+  c: Nat,
+  xs: List(Nat),
+  r: List(Nat),
+  e: no_byte(c, xs) = true
+): Bytes::split(List::append(xs, Cons(c, r)), c) = split_pair(xs, Bytes::split(r, c)) {
+  ⊢ Bytes::split(
+    List::append(xs, Cons(c, r)),
+    c
+  ) = split_pair(xs, Bytes::split(r, c)) from match xs {
+    Nil => split_step_sep(c, Bytes::split(r, c))
+    Cons(h, t) => Eq::trans(
+      split_step_no(h, c, Bytes::split(List::append(t, Cons(c, r)), c), no_byte_head(c, h, t, e)),
+      Eq::trans(
+        Eq::congr(⟦split_cons(h, □)⟧, split_append(c, t, r, no_byte_tail(c, h, t, e))),
+        split_cons_pair(h, t, Bytes::split(r, c))
+      )
+    )
+  }
+}
+
+// Without `c`, there is one piece.
+pub theorem split_none(
+  c: Nat,
+  xs: List(Nat),
+  e: no_byte(c, xs) = true
+): Bytes::split(xs, c) = #(Nil, xs) {
+  match xs {
+    Nil => Refl
+    Cons(h, t) => Eq::trans(
+      split_step_no(h, c, Bytes::split(t, c), no_byte_head(c, h, t, e)),
+      Eq::congr(⟦split_cons(h, □)⟧, split_none(c, t, no_byte_tail(c, h, t, e)))
+    )
+  }
+}
+
+// Whether no piece has `c`.
+pub fn none_has(c: Nat, ls: List(List(Nat))): Bool {
+  match ls {
+    Nil => true
+    Cons(l, t) => no_byte(c, l) && none_has(c, t)
+  }
+}
+
+// Splitting pieces joined with `c` gives them back, when none has `c`.
+pub theorem split_join(
+  c: Nat,
+  p: List(Nat),
+  rest: List(List(Nat)),
+  hp: no_byte(c, p) = true,
+  hr: none_has(c, rest) = true
+): Bytes::split(List::append(p, Bytes::join_rest(Cons(c, Nil), rest)), c) = #(rest, p) {
+  match rest {
+    Nil => Eq::trans(Eq::congr(⟦Bytes::split(□, c)⟧, List::append_nil(p)), split_none(c, p, hp))
+    Cons(q, qs) => Eq::trans(
+      split_append(c, p, List::append(q, Bytes::join_rest(Cons(c, Nil), qs)), hp),
+      Eq::congr(
+        ⟦split_pair(p, □)⟧,
+        split_join(
+          c,
+          q,
+          qs,
+          yes_left(no_byte(c, q), none_has(c, qs), hr),
+          yes_right(no_byte(c, q), none_has(c, qs), hr)
+        )
+      )
+    )
+  }
+}
+
+pub theorem pair_lines_split(
+  xs: List(Nat),
+  p: List(List(Nat)) × List(Nat)
+): pair_lines(split_pair(xs, p)) = Cons(xs, pair_lines(p)) {
+  match p {
+    #(snd, fst) => Refl
+  }
+}
+
+// Splitting a line that ends in a line feed gives that line first.
+pub theorem lines_append(
+  xs: List(Nat),
+  r: List(Nat),
+  e: no_byte(10, xs) = true
+): lines(List::append(xs, Cons(10, r))) = Cons(xs, lines(r)) {
+  Eq::trans(
+    Eq::congr(⟦pair_lines(□)⟧, split_append(10, xs, r, e)),
+    pair_lines_split(xs, Bytes::split(r, 10))
+  )
+}
+
+// ---- equality ------------------------------------------------------------------------
+
+pub fn byte_list_eq(a: List(Nat), b: List(Nat)): Bool {
+  match a {
+    Nil => ⊢ Bool from match b {
+      Nil => true
+      Cons(y, u) => false
+    }
+    Cons(x, t) => ⊢ Bool from match b {
+      Nil => false
+      Cons(y, u) => Nat::eq(x, y) && byte_list_eq(t, u)
+    }
+  }
+}
+
+pub theorem bytes_eq_refl(a: List(Nat)): byte_list_eq(a, a) = true {
+  match a {
+    Nil => Refl
+    Cons(x, t) => Eq::trans(Eq::congr(⟦□ && byte_list_eq(t, t)⟧, Nat::eq_refl(x)), bytes_eq_refl(t))
+  }
+}
+
+// ASCII lower case, for header names.
+pub fn lower_byte(b: Nat): Nat {
+  match Nat::le(65, b) && Nat::le(b, 90) {
+    true => Nat::add(b, 32)
+    false => b
+  }
+}
+
+pub fn lower(l: List(Nat)): List(Nat) {
+  match l {
+    Nil => Nil
+    Cons(b, t) => Cons(lower_byte(b), lower(t))
+  }
+}
+
+// Equal ignoring ASCII case.
+pub fn bytes_eq_ci(a: List(Nat), b: List(Nat)): Bool {
+  byte_list_eq(lower(a), lower(b))
+}
+
+// ---- cutting and joining texts -----------------------------------------------------
+
+// The bytes of `t` from `start` to `end`. The splitting below cuts only next to a byte
+// that is ASCII (a separator such as `/`, `&`, `=` or a space), so the pieces of UTF-8 text
+// are UTF-8 text again. Cutting next to a byte of 128 or more could split a character.
+pub fn cut(t: Text, start: Nat, end: Nat): Text {
+  Text::Mk(List::take(Nat::sub(end, start), List::drop(start, Text::bytes(t))))
+}
+
+pub fn byte_at(t: Text, i: Nat): Nat {
+  match Text::byte(t, i) {
+    None => 0
+    Some(b) => b
+  }
+}
+
+// The text after the separator at the front of `l`; nothing when `l` is empty.
+pub fn after_sep(l: List(Nat)): Option(Text) {
+  match l {
+    Nil => None
+    Cons(c, t) => Some(Text::Mk(t))
+  }
+}
+
+// The text before the first separator, and the text after it if there is one.
+pub fn split_halves(p: @before List(Nat) × @after List(Nat)): Text × Option(Text) {
+  match p {
+    #(@before b, @after a) => #(Text::Mk(b), after_sep(a))
+  }
+}
+
+pub fn split_once(t: Text, c: Nat): Text × Option(Text) {
+  split_halves(take_until(c, Text::bytes(t)))
+}
+
+// Split after a part without `c`, the parts come back.
+pub theorem split_once_append(
+  c: Nat,
+  a: List(Nat),
+  b: List(Nat),
+  e: no_byte(c, a) = true
+): split_once(Text::Mk(List::append(a, Cons(c, b))), c) = #(Text::Mk(a), Some(Text::Mk(b))) {
+  Eq::congr(⟦split_halves(□)⟧, take_until_append(c, a, b, e))
+}
+
+// ---- comparing a text with bytes in place --------------------------------------------
+
+// What is left of `bs` from `i` on, read by its first element.
+pub fn drop_at(bs: List(Nat), i: Nat): List(Nat) {
+  match List::nth(bs, i) {
+    None => Nil
+    Some(x) => Cons(x, List::drop(Succ(i), bs))
+  }
+}
+
+pub theorem drop_nth(bs: List(Nat), i: Nat): List::drop(i, bs) = drop_at(bs, i) {
+  match bs {
+    Nil => ⊢ List::drop(i, Nil(<A: Nat>)) = drop_at(Nil(<A: Nat>), i) from match i {
+      Zero => Refl
+      Succ(j) => Refl
+    }
+    Cons(h, t) => ⊢ List::drop(i, Cons(h, t)) = drop_at(Cons(h, t), i) from match i {
+      Zero => Refl
+      Succ(j) => drop_nth(t, j)
+    }
+  }
+}
+
+// `bytes_eq_ci` of the bytes of `t` from `i` on and `name`, reading `t` with
+// `Text::byte`: a program builds no list of the text's bytes.
+pub fn text_eq_ci_at(t: Text, i: Nat, name: List(Nat)): Bool {
+  match name {
+    Nil => ⊢ Bool from match Text::byte(t, i) {
+      None => true
+      Some(x) => false
+    }
+    Cons(y, u) => ⊢ Bool from match Text::byte(t, i) {
+      None => false
+      Some(x) => Nat::eq(lower_byte(x), lower_byte(y)) && text_eq_ci_at(t, Succ(i), u)
+    }
+  }
+}
+
+pub fn eq_ci_pick(o: Option(Nat), rest: List(Nat), name: List(Nat)): Bool {
+  byte_list_eq(lower(⊢ List(Nat) from match o {
+    None => Nil
+    Some(x) => Cons(x, rest)
+  }), lower(name))
+}
+
+pub theorem text_eq_ci_nil(
+  o: Option(Nat),
+  rest: List(Nat)
+): (⊢ Bool from match o {
+  None => true
+  Some(x) => false
+}) = eq_ci_pick(o, rest, Nil) {
+  ⊢ (⊢ Bool from match o {
+    None => true
+    Some(x) => false
+  }) = eq_ci_pick(o, rest, Nil) from match o {
+    None => Refl
+    Some(x) => Refl
+  }
+}
+
+pub theorem text_eq_ci_cons(
+  o: Option(Nat),
+  rest: List(Nat),
+  y: Nat,
+  u: List(Nat),
+  r: Bool,
+  h: r = bytes_eq_ci(rest, u)
+): (⊢ Bool from match o {
+  None => false
+  Some(x) => Nat::eq(lower_byte(x), lower_byte(y)) && r
+}) = eq_ci_pick(o, rest, Cons(y, u)) {
+  ⊢ (⊢ Bool from match o {
+    None => false
+    Some(x) => Nat::eq(lower_byte(x), lower_byte(y)) && r
+  }) = eq_ci_pick(o, rest, Cons(y, u)) from match o {
+    None => Refl
+    Some(x) => Eq::congr(⟦Nat::eq(lower_byte(x), lower_byte(y)) && □⟧, h)
+  }
+}
+
+pub theorem text_eq_ci_on(
+  t: Text,
+  i: Nat,
+  name: List(Nat)
+): text_eq_ci_at(t, i, name) = byte_list_eq(lower(drop_at(Text::bytes(t), i)), lower(name)) {
+  match name {
+    Nil => text_eq_ci_nil(List::nth(Text::bytes(t), i), List::drop(Succ(i), Text::bytes(t)))
+    Cons(y, u) => text_eq_ci_cons(
+      List::nth(Text::bytes(t), i),
+      List::drop(Succ(i), Text::bytes(t)),
+      y,
+      u,
+      text_eq_ci_at(t, Succ(i), u),
+      Eq::trans(
+        text_eq_ci_on(t, Succ(i), u),
+        Eq::congr(⟦byte_list_eq(lower(□), lower(u))⟧, Eq::sym(drop_nth(Text::bytes(t), Succ(i))))
+      )
+    )
+  }
+}
+
+pub theorem text_eq_ci_at_eq(
+  t: Text,
+  i: Nat,
+  name: List(Nat)
+): text_eq_ci_at(t, i, name) = bytes_eq_ci(List::drop(i, Text::bytes(t)), name) {
+  Eq::trans(
+    text_eq_ci_on(t, i, name),
+    Eq::congr(⟦byte_list_eq(lower(□), lower(name))⟧, Eq::sym(drop_nth(Text::bytes(t), i)))
+  )
+}

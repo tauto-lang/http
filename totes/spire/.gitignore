@@ -1,0 +1,9 @@
+*
+!*/
+!.gitignore
+
+!/Tauto.eure
+!/README.md
+
+!/examples/*.taut
+!/src/*.taut

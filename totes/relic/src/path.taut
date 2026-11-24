@@ -1,0 +1,118 @@
+import std::base { Nat }
+import std::text { Text }
+import "../../http/src/percent.taut" { percent_decode }
+import "../../http/src/tsplit.taut" { split_text }
+
+// Path segments, with every empty piece dropped: those from a leading or trailing `/`
+// and from a doubled one (`/users//1` is two segments).
+// `/` is no segments. `/healthz` is one. `/users/1` is two.
+// The path is cut at each `/` and the pieces are passed on as they are, not percent-decoded:
+// `/users/a%20b` gives `a%20b`, and `%2F` does not split. (Query values are decoded, below.)
+pub fn segments(path: Text): List(Text) {
+  drop_empty(split_text(path, 47))
+}
+
+fn drop_empty(xs: List(Text)): List(Text) {
+  match xs {
+    Nil => Nil
+    Cons(s, rest) => if s == "" { drop_empty(rest) } else { Cons(s, drop_empty(rest)) }
+  }
+}
+
+// The value of `key` in a query, percent-decoded. `None` when the key is
+// absent. A key with no `=` has the empty value.
+pub fn query_value(q: Option(Text), key: Text): Option(Text) {
+  match q {
+    None => None
+    Some(t) => find_key(split_text(t, 38), key)
+  }
+}
+
+fn find_key(parts: List(Text), key: Text): Option(Text) {
+  match parts {
+    Nil => None
+    Cons(p, rest) => match piece(p) {
+      #(k, v) => if percent_decode(k) == key { Some(percent_decode(v)) } else {
+        find_key(rest, key)
+      }
+    }
+  }
+}
+
+fn piece(p: Text): Text × Text {
+  match split_text(p, 61) {
+    Nil => #("", "")
+    Cons(k, rest) => match rest {
+      Nil => #(k, "")
+      Cons(y, more) => #(k, join_eq(rest))
+    }
+  }
+}
+
+fn join_eq(xs: List(Text)): Text {
+  match xs {
+    Nil => ""
+    Cons(x, rest) => match rest {
+      Nil => x
+      Cons(y, more) => concat(x, concat("=", join_eq(rest)))
+    }
+  }
+}
+
+// Reading a path segment or a query value as one of the types `router!`
+// knows. Another type `T` is read by `T::from_path(segment: Text): Option(T)`,
+// written next to `T`; a type of another package is wrapped in a newtype.
+
+// Any segment that is not empty.
+pub fn path_text(t: Text): Option(Text) {
+  if t == "" { None } else { Some(t) }
+}
+
+fn digits_of(bs: List(Nat), acc: Nat): Option(Nat) {
+  match bs {
+    Nil => Some(acc)
+    Cons(b, rest) => if b >= 48 && b <= 57 {
+      digits_of(rest, Nat::add(Nat::mul(acc, 10), Nat::sub(b, 48)))
+    } else {
+      None
+    }
+  }
+}
+
+// Decimal digits only, at least one.
+pub fn path_nat(t: Text): Option(Nat) {
+  match Text::bytes(t) {
+    Nil => None
+    Cons(b, rest) => digits_of(Cons(b, rest), 0)
+  }
+}
+
+// Decimal digits only, at most `u64`'s largest.
+pub fn path_u64(t: Text): Option(u64) {
+  match path_nat(t) {
+    None => None
+    Some(n) => if n <= 18446744073709551615 { Some(U64::of_nat(n)) } else { None }
+  }
+}
+
+// Decimal digits after an optional `-`, with the digits no greater than `i64`'s largest
+// value, 9223372036854775807. So `-9223372036854775808` is not accepted.
+pub fn path_i64(t: Text): Option(i64) {
+  let magnitude := match Text::bytes(t) {
+    Cons(45, rest) => #(true, match rest {
+      Nil => None
+      Cons(b, more) => digits_of(rest, 0)
+    })
+    Nil => #(false, path_nat(t))
+    Cons(first, others) => #(false, path_nat(t))
+  }
+  match magnitude {
+    #(neg, None) => None
+    #(neg, Some(n)) => if n > 9223372036854775807 {
+      None
+    } else {
+      let x := I64::of_u64(U64::of_nat(n))
+      if neg { handle { Some(0 - x) } with { overflow() => None } } else { Some(x) }
+    }
+  }
+}

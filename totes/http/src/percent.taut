@@ -1,0 +1,326 @@
+import std::base { Bool, Nat }
+import std::text { Text, utf8_valid }
+import "bytes.taut" { no_byte, no_byte_head, no_byte_tail, yes_left, yes_right }
+import url::bytes { all_bytes, is_byte }
+import url::percent { hex_digit, pct_decode, pct_encode }
+import url::proof::percent { pct_decode_encode }
+
+// Percent-encoding of URLs and form bodies, on top of the url tote: a byte that RFC 3986
+// does not leave as it is becomes `%XX`, and when reading, `+` is a space as in a form.
+// Decoding what was encoded gives the text back.
+
+fn utf8_or(o: Option(Text), t: Text): Text {
+  match o {
+    None => t
+    Some(x) => x
+  }
+}
+
+// `+` as a space, as in a form's query.
+fn plus_space(l: List(Nat)): List(Nat) {
+  match l {
+    Nil => Nil
+    Cons(b, t) => Cons(⊢ Nat from match Nat::eq(b, 43) {
+      true => 32
+      false => b
+    }, plus_space(t))
+  }
+}
+
+pub module Percent {
+  pub fn bytes(l: List(Nat)): List(Nat) {
+    pct_decode(plus_space(l))
+  }
+
+  theorem bytes_encode(l: List(Nat), ok: bytes_ok(l) = true): Percent::bytes(encode_bytes(l)) = l {
+    Eq::trans(
+      Eq::congr(
+        ⟦pct_decode(□)⟧,
+        plus_space_id(
+          encode_bytes(l),
+          encode_no_byte(
+            43,
+            l,
+            (b: Nat, u: unreserved(b) = true) => unreserved_plus(b, u),
+            Refl,
+            hex_ne_plus
+          )
+        )
+      ),
+      pct_decode_encode(reserved, Refl, l, ok)
+    )
+  }
+
+  // A UTF-8 text survives `percent_encode` and then `percent_decode`.
+  pub theorem decode_encode(
+    t: Text,
+    ok: bytes_ok(Text::bytes(t)) = true,
+    utf8: utf8_valid(Text::bytes(t)) = true
+  ): percent_decode(percent_encode(t)) = t {
+    match t {
+      Text::Mk(bs) => Eq::trans(
+        Eq::congr(
+          ⟦utf8_or(Text::of_utf8(□), percent_encode(Text::Mk(bs)))⟧,
+          Percent::bytes_encode(bs, ok)
+        ),
+        Eq::congr(⟦utf8_or(text_gate(□, bs), percent_encode(Text::Mk(bs)))⟧, utf8)
+      )
+    }
+  }
+}
+
+// `%XX` as its byte and `+` as a space. A `%` without two hex digits after it stays as it
+// is. When the bytes are not UTF-8, the text stays undecoded.
+pub fn percent_decode(t: Text): Text {
+  utf8_or(Text::of_utf8(Percent::bytes(Text::bytes(t))), t)
+}
+
+// ---- percent-encoding ----------------------------------------------------------------------
+
+fn in_range(lo: Nat, hi: Nat, b: Nat): Bool {
+  Nat::le(lo, b) && Nat::le(b, hi)
+}
+
+// The bytes RFC 3986 leaves as they are: letters, digits and `-` `.` `_` `~`.
+// (`+`, `%`, `&` and `=` are not among them; `unreserved` rules them out one by one,
+// and the lemmas below rely on that.)
+fn unreserved_class(b: Nat): Bool {
+  Bool::or(
+    in_range(65, 90, b) || in_range(97, 122, b),
+    Bool::or(
+      in_range(48, 57, b),
+      Nat::eq(b, 45) || Nat::eq(b, 46) || (Nat::eq(b, 95) || Nat::eq(b, 126))
+    )
+  )
+}
+
+fn unreserved(b: Nat): Bool {
+  Bool::and(
+    not(Nat::eq(b, 43)),
+    Bool::and(
+      not(Nat::eq(b, 37)),
+      not(Nat::eq(b, 38)) && (not(Nat::eq(b, 61)) && unreserved_class(b))
+    )
+  )
+}
+
+// The bytes written as `%XX`.
+fn reserved(b: Nat): Bool {
+  not(unreserved(b))
+}
+
+pub fn encode_bytes(l: List(Nat)): List(Nat) {
+  pct_encode(reserved, l)
+}
+
+// Every byte but the unreserved ones as `%XX`, so the text can stand anywhere
+// in a query, a path segment or a form.
+pub fn percent_encode(t: Text): Text {
+  Text::Mk(encode_bytes(Text::bytes(t)))
+}
+
+// ---- what the encoding never writes ------------------------------------------------------
+
+fn unreserved_rest(b: Nat): Bool {
+  not(Nat::eq(b, 37)) && unreserved_more(b)
+}
+
+fn unreserved_more(b: Nat): Bool {
+  not(Nat::eq(b, 38)) && (not(Nat::eq(b, 61)) && unreserved_class(b))
+}
+
+theorem unreserved_plus(b: Nat, u: unreserved(b) = true): Nat::eq(b, 43) = false {
+  Bool::not_true(Nat::eq(b, 43), yes_left(not(Nat::eq(b, 43)), unreserved_rest(b), u))
+}
+
+theorem unreserved_tail(b: Nat, u: unreserved(b) = true): unreserved_rest(b) = true {
+  yes_right(not(Nat::eq(b, 43)), unreserved_rest(b), u)
+}
+
+theorem unreserved_more_of(b: Nat, u: unreserved(b) = true): unreserved_more(b) = true {
+  yes_right(not(Nat::eq(b, 37)), unreserved_more(b), unreserved_tail(b, u))
+}
+
+theorem unreserved_amp(b: Nat, u: unreserved(b) = true): Nat::eq(b, 38) = false {
+  Bool::not_true(
+    Nat::eq(b, 38),
+    yes_left(
+      not(Nat::eq(b, 38)),
+      not(Nat::eq(b, 61)) && unreserved_class(b),
+      unreserved_more_of(b, u)
+    )
+  )
+}
+
+theorem unreserved_equals(b: Nat, u: unreserved(b) = true): Nat::eq(b, 61) = false {
+  Bool::not_true(
+    Nat::eq(b, 61),
+    yes_left(
+      not(Nat::eq(b, 61)),
+      unreserved_class(b),
+      yes_right(
+        not(Nat::eq(b, 38)),
+        not(Nat::eq(b, 61)) && unreserved_class(b),
+        unreserved_more_of(b, u)
+      )
+    )
+  )
+}
+
+theorem not_false(x: Bool, e: not(x) = false): x = true {
+  match x {
+    true => Refl
+    false => False::elim(true_ne_false(e))
+  }
+}
+
+// A hex digit is never `+`, `&` or `=`.
+theorem hex_ne_plus(d: Nat): Nat::eq(hex_digit(d), 43) = false {
+  ⊢ Nat::eq(
+    ⊢ Nat from match Nat::lt(d, 10) { true => Nat::add(d, 48), false => Nat::add(d, 55) },
+    43
+  ) = false from match Nat::lt(d, 10) eqn e {
+    false => Refl
+    true => Refl
+  }
+}
+
+theorem hex_ne_amp(d: Nat): Nat::eq(hex_digit(d), 38) = false {
+  ⊢ Nat::eq(
+    ⊢ Nat from match Nat::lt(d, 10) { true => Nat::add(d, 48), false => Nat::add(d, 55) },
+    38
+  ) = false from match Nat::lt(d, 10) eqn e {
+    false => Refl
+    true => Refl
+  }
+}
+
+theorem hex_ne_equals(d: Nat): Nat::eq(hex_digit(d), 61) = false {
+  ⊢ Nat::eq(
+    ⊢ Nat from match Nat::lt(d, 10) { true => Nat::add(d, 48), false => Nat::add(d, 55) },
+    61
+  ) = false from match Nat::lt(d, 10) eqn e {
+    false => ⊢ Nat::eq(d, 6) = false from match Nat::eq(d, 6) eqn h {
+      false => Refl
+      true => False::elim(
+        false_ne_true(Eq::trans(Eq::sym(e), Eq::congr(⟦Nat::lt(□, 10)⟧, Nat::eq_sound(d, 6, h))))
+      )
+    }
+    true => ⊢ Nat::eq(d, 13) = false from match Nat::eq(d, 13) eqn h {
+      false => Refl
+      true => False::elim(
+        false_ne_true(Eq::trans(Eq::sym(Eq::congr(⟦Nat::lt(□, 10)⟧, Nat::eq_sound(d, 13, h))), e))
+      )
+    }
+  }
+}
+
+// The encoding writes no `c` when `c` is not unreserved, not `%` and not a hex digit.
+theorem encode_no_byte(
+  c: Nat,
+  l: List(Nat),
+  hu: (b: Nat, u: unreserved(b) = true) -> Nat::eq(b, c) = false,
+  h37: Nat::eq(37, c) = false,
+  hhex: (d: Nat) -> Nat::eq(hex_digit(d), c) = false
+): no_byte(c, encode_bytes(l)) = true {
+  match l {
+    Nil => Refl
+    Cons(b, t) => ⊢ no_byte(
+      c,
+      ⊢ List(Nat) from match reserved(b) {
+        true => Cons(37, Cons(hex_digit(Nat::rem_nz(Nat::div_nz(b, 16, Nat::ne_zero(16, Refl)), 16, Nat::ne_zero(16, Refl))), Cons(hex_digit(Nat::rem_nz(b, 16, Nat::ne_zero(16, Refl))), encode_bytes(t))))
+        false => Cons(b, encode_bytes(t))
+      }
+    ) = true from match reserved(b) eqn e {
+      false => Eq::trans(
+        Eq::congr(⟦not(□) && no_byte(c, encode_bytes(t))⟧, hu(b, not_false(unreserved(b), e))),
+        encode_no_byte(c, t, hu, h37, hhex)
+      )
+      true => Eq::trans(
+        Eq::congr(
+          ⟦not(□) && (
+            not(
+              Nat::eq(
+                hex_digit(
+                  Nat::rem_nz(
+                    Nat::div_nz(b, 16, Nat::ne_zero(16, Refl)),
+                    16,
+                    Nat::ne_zero(16, Refl)
+                  )
+                ),
+                c
+              )
+            ) && (
+              not(
+                Nat::eq(hex_digit(Nat::rem_nz(b, 16, Nat::ne_zero(16, Refl))), c)
+              ) && no_byte(c, encode_bytes(t))
+            )
+          )⟧,
+          h37
+        ),
+        Eq::trans(
+          Eq::congr(
+            ⟦not(□) && (
+              not(
+                Nat::eq(hex_digit(Nat::rem_nz(b, 16, Nat::ne_zero(16, Refl))), c)
+              ) && no_byte(c, encode_bytes(t))
+            )⟧,
+            hhex(
+              Nat::rem_nz(Nat::div_nz(b, 16, Nat::ne_zero(16, Refl)), 16, Nat::ne_zero(16, Refl))
+            )
+          ),
+          Eq::trans(
+            Eq::congr(
+              ⟦not(□) && no_byte(c, encode_bytes(t))⟧,
+              hhex(Nat::rem_nz(b, 16, Nat::ne_zero(16, Refl)))
+            ),
+            encode_no_byte(c, t, hu, h37, hhex)
+          )
+        )
+      )
+    }
+  }
+}
+
+pub theorem encode_no_amp(l: List(Nat)): no_byte(38, encode_bytes(l)) = true {
+  encode_no_byte(38, l, (b: Nat, u: unreserved(b) = true) => unreserved_amp(b, u), Refl, hex_ne_amp)
+}
+
+pub theorem encode_no_equals(l: List(Nat)): no_byte(61, encode_bytes(l)) = true {
+  encode_no_byte(
+    61,
+    l,
+    (b: Nat, u: unreserved(b) = true) => unreserved_equals(b, u),
+    Refl,
+    hex_ne_equals
+  )
+}
+
+// ---- percent-decoding gives back what was encoded ---------------------------------------
+
+// Bytes, as an encoder sees them: each below 256.
+pub fn bytes_ok(l: List(Nat)): Bool {
+  all_bytes(is_byte, l)
+}
+
+// Without `+`, reading `+` as a space changes nothing.
+theorem plus_space_id(l: List(Nat), h: no_byte(43, l) = true): plus_space(l) = l {
+  match l {
+    Nil => Refl
+    Cons(b, t) => Eq::trans(
+      Eq::congr(
+        (x: Bool) => Cons(⊢ Nat from match x { true => 32, false => b }, plus_space(t)),
+        no_byte_head(43, b, t, h)
+      ),
+      Eq::congr(⟦Cons(b, □)⟧, plus_space_id(t, no_byte_tail(43, b, t, h)))
+    )
+  }
+}
+
+// `Text::of_utf8` once it has checked the bytes.
+fn text_gate(y: Bool, bs: List(Nat)): Option(Text) {
+  match y {
+    true => Some(Text::Mk(bs))
+    false => None
+  }
+}

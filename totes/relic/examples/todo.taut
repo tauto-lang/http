@@ -1,0 +1,70 @@
+import "../../http/src/status.taut" { Status }
+import "../src/app.taut" { render }
+import "../src/response.taut" { Response, text_response }
+import "../src/router.taut" { router }
+
+struct Todo { id: Nat, title: Text }
+
+fn length(xs: List(Todo)): Nat {
+  match xs {
+    Nil => 0
+    Cons(t, rest) => Succ(length(rest))
+  }
+}
+
+fn line(t: Todo): Text {
+  concat(Text::of_nat(t.id), concat(" ", t.title))
+}
+
+fn show(xs: List(Todo)): Text {
+  match xs {
+    Nil => ""
+    Cons(t, Nil) => line(t)
+    Cons(t, rest) => concat(line(t), concat("\n", show(rest)))
+  }
+}
+
+fn add(xs: List(Todo), title: Text): List(Todo) {
+  Cons(Todo { id: Succ(length(xs)), title: title }, xs)
+}
+
+fn remove(xs: List(Todo), id: Nat): List(Todo) {
+  match xs {
+    Nil => Nil
+    Cons(t, rest) => if t.id == id { remove(rest, id) } else { Cons(t, remove(rest, id)) }
+  }
+}
+
+fn sample(): List(Todo) {
+  Cons(Todo { id: 1, title: "buy milk" }, Cons(Todo { id: 2, title: "walk the dog" }, Nil))
+}
+
+fn list_todos(): Response {
+  text_response(Status::ok(), show(sample()))
+}
+
+// Without `?title` the item is "untitled".
+fn add_todo(added: { title: Option(Text) }): Response {
+  text_response(Status::created(), show(add(sample(), Option::unwrap_or(added.title, "untitled"))))
+}
+
+fn delete_todo(item: { id: Nat }): Response {
+  text_response(Status::ok(), show(remove(sample(), item.id)))
+}
+
+fn missing(): Response {
+  text_response(Status::not_found(), "not found")
+}
+
+router!(```
+  Route ! {}
+  /todos Todos get: list_todos {
+    /new ?[title: Text] Add post: add_todo
+    /{id: Nat} Item delete: delete_todo
+  }
+  /* Missing any: missing
+  ```) => enum Route, fn route, fn handler
+
+pub fn todo_answer(raw: Text): Text {
+  render(raw, route, handler)
+}

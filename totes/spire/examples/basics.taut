@@ -1,0 +1,114 @@
+import "../src/service.taut" { Outcome, Service, service_call, service_fn }
+import "../src/layer.taut" { Layer }
+import "../src/middleware.taut" { filter, map_err, map_request, map_response }
+import "../src/rate_limit.taut" { refill }
+
+// The small pieces on their own: a service made from a function, the three
+// mappings, a filter, and a refill of the rate limit's tokens.
+
+fn double(n: Nat): Outcome(Nat, Nat) {
+  Outcome::Ok(<Res: Nat, E: Nat>, add(n, n))
+}
+
+fn base(): Service(Unit, Nat, Nat, Nat) {
+  service_fn(double)
+}
+
+fn add(a: Nat, b: Nat): Nat {
+  match a {
+    Zero => b
+    Succ(k) => Succ(add(k, b))
+  }
+}
+
+theorem fn_answers(): service_call(
+  base(),
+  (),
+  Succ(Succ(Zero))
+) = #(@outcome Outcome::Ok(<Res: Nat, E: Nat>, Succ(Succ(Succ(Succ(Zero))))), @state ()) {
+  Refl
+}
+
+fn inc(n: Nat): Nat {
+  Succ(n)
+}
+
+theorem request_mapped(): service_call(
+  Layer::apply(map_request(<S: Unit, R1: Nat, R2: Nat, Res: Nat, E: Nat>, inc), base()),
+  (),
+  Succ(Zero)
+) = #(@outcome Outcome::Ok(<Res: Nat, E: Nat>, Succ(Succ(Succ(Succ(Zero))))), @state ()) {
+  Refl
+}
+
+theorem response_mapped(): service_call(
+  Layer::apply(map_response(<S: Unit, Req: Nat, Res: Nat, Res2: Nat, E: Nat>, inc), base()),
+  (),
+  Succ(Zero)
+) = #(@outcome Outcome::Ok(<Res: Nat, E: Nat>, Succ(Succ(Succ(Zero)))), @state ()) {
+  Refl
+}
+
+fn fails(n: Nat): Outcome(Nat, Nat) {
+  Outcome::Err(<Res: Nat, E: Nat>, n)
+}
+
+theorem error_mapped(): service_call(
+  Layer::apply(map_err(<S: Unit, Req: Nat, Res: Nat, E: Nat, E2: Nat>, inc), service_fn(fails)),
+  (),
+  Succ(Zero)
+) = #(@outcome Outcome::Err(<Res: Nat, E: Nat>, Succ(Succ(Zero))), @state ()) {
+  Refl
+}
+
+// Zero is refused with the error `Zero`; anything else passes.
+fn not_zero(n: Nat): Option(Nat) {
+  match n {
+    Zero => Some(Zero)
+    Succ(_) => None
+  }
+}
+
+theorem filter_refuses(): service_call(
+  Layer::apply(filter(<S: Unit, Req: Nat, Res: Nat, E: Nat>, not_zero), base()),
+  (),
+  Zero
+) = #(@outcome Outcome::Err(<Res: Nat, E: Nat>, Zero), @state ()) {
+  Refl
+}
+
+theorem filter_passes(): service_call(
+  Layer::apply(filter(<S: Unit, Req: Nat, Res: Nat, E: Nat>, not_zero), base()),
+  (),
+  Succ(Zero)
+) = #(@outcome Outcome::Ok(<Res: Nat, E: Nat>, Succ(Succ(Zero))), @state ()) {
+  Refl
+}
+
+// After the budget of one request is spent, `refill` gives the token back.
+theorem refill_resets(): refill(
+  Succ(Zero),
+  #(@tokens Zero, @state ())
+) = #(@tokens Succ(Zero), @state ()) {
+  Refl
+}
+
+// The laws `spire` proves hold for the layers made here: the identity layer changes
+// nothing (`Layer::identity_left`), and stacking is associative (`Layer::then_assoc`).
+fn request_layer(): Layer(Service(Unit, Nat, Nat, Nat), Service(Unit, Nat, Nat, Nat)) {
+  map_request(<S: Unit, R1: Nat, R2: Nat, Res: Nat, E: Nat>, inc)
+}
+
+theorem identity_changes_nothing(): Layer::then(
+  Layer::identity(),
+  request_layer()
+) = request_layer() {
+  Layer::identity_left(request_layer())
+}
+
+theorem stacking_is_associative(): Layer::then(
+  Layer::then(request_layer(), request_layer()),
+  request_layer()
+) = Layer::then(request_layer(), Layer::then(request_layer(), request_layer())) {
+  Layer::then_assoc(request_layer(), request_layer(), request_layer())
+}

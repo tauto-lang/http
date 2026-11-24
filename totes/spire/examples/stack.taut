@@ -1,0 +1,51 @@
+import "../src/service.taut" { Outcome, Service }
+import "../src/layer.taut" { Layer }
+import "../src/retry.taut" { retry }
+import "../src/rate_limit.taut" { Limited, outcomes_of, rate_limit, run_all }
+
+// A flaky backend: its state counts the calls, and it answers only every
+// second call. Retrying once gets an answer; the rate limit allows two
+// requests until the next refill.
+
+inductive FlakyError: Type {
+  Busy: FlakyError
+}
+
+fn is_even(n: Nat): Bool {
+  match n {
+    Zero => true
+    Succ(k) => not(is_even(k))
+  }
+}
+
+fn flaky(): Service(Nat, Nat, Nat, FlakyError) {
+  Service::Mk((calls: Nat, r: Nat) => ⊢ @outcome Outcome(Nat, FlakyError) × @state Nat from match is_even(calls) {
+    true => #(@outcome Outcome::Err(<Res: Nat, E: FlakyError>, Busy), @state Succ(calls))
+    false => #(@outcome Outcome::Ok(<Res: Nat, E: FlakyError>, Succ(r)), @state Succ(calls))
+  })
+}
+
+fn always(r: Nat, e: FlakyError): Bool {
+  true
+}
+
+// Retry inside, rate limit outside.
+fn stack(): Service(@tokens Nat × @state Nat, Nat, Nat, Limited(FlakyError)) {
+  Layer::apply(Layer::then(retry(always, Succ(Zero)), rate_limit()), flaky())
+}
+
+theorem stack_answers(): outcomes_of(
+  run_all(
+    stack(),
+    Cons(Zero, Cons(Succ(Zero), Cons(Zero, Nil))),
+    #(@tokens Succ(Succ(Zero)), @state Zero)
+  )
+) = Cons(
+  Outcome::Ok(<Res: Nat, E: Limited(FlakyError)>, Succ(Zero)),
+  Cons(
+    Outcome::Ok(<Res: Nat, E: Limited(FlakyError)>, Succ(Succ(Zero))),
+    Cons(Outcome::Err(<Res: Nat, E: Limited(FlakyError)>, Overloaded), Nil)
+  )
+) {
+  Refl
+}

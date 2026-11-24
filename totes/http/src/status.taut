@@ -1,0 +1,391 @@
+import std::base { Nat }
+
+// A status code: three digits, the first from 1 to 9 (RFC 9110 section 15). A code outside
+// 100 to 999 cannot be written, so every status prints as three digits and reads back as itself.
+
+pub(open) inductive Digit: Type {
+  D0: Digit
+  D1: Digit
+  D2: Digit
+  D3: Digit
+  D4: Digit
+  D5: Digit
+  D6: Digit
+  D7: Digit
+  D8: Digit
+  D9: Digit
+}
+
+pub(open) inductive Lead: Type {
+  L1: Lead
+  L2: Lead
+  L3: Lead
+  L4: Lead
+  L5: Lead
+  L6: Lead
+  L7: Lead
+  L8: Lead
+  L9: Lead
+}
+
+pub(open) inductive Status: Type {
+  Mk(lead: Lead, tens: Digit, ones: Digit): Status
+}
+
+pub module Digit {
+  pub fn value(d: Digit): Nat {
+    match d {
+      D0 => 0
+      D1 => 1
+      D2 => 2
+      D3 => 3
+      D4 => 4
+      D5 => 5
+      D6 => 6
+      D7 => 7
+      D8 => 8
+      D9 => 9
+    }
+  }
+
+  // The ASCII byte of the digit.
+  pub fn byte(d: Digit): Nat {
+    Nat::add(Digit::value(d), 48)
+  }
+
+  // The digit of an ASCII byte, if it is one.
+  pub fn of_byte(b: Nat): Option(Digit) {
+    match Nat::eq(b, 48) {
+      true => Some(D0)
+      false => ⊢ Option(Digit) from match Nat::eq(b, 49) {
+        true => Some(D1)
+        false => ⊢ Option(Digit) from match Nat::eq(b, 50) {
+          true => Some(D2)
+          false => ⊢ Option(Digit) from match Nat::eq(b, 51) {
+            true => Some(D3)
+            false => ⊢ Option(Digit) from match Nat::eq(b, 52) {
+              true => Some(D4)
+              false => ⊢ Option(Digit) from match Nat::eq(b, 53) {
+                true => Some(D5)
+                false => ⊢ Option(Digit) from match Nat::eq(b, 54) {
+                  true => Some(D6)
+                  false => ⊢ Option(Digit) from match Nat::eq(b, 55) {
+                    true => Some(D7)
+                    false => ⊢ Option(Digit) from match Nat::eq(b, 56) {
+                      true => Some(D8)
+                      false => ⊢ Option(Digit) from match Nat::eq(b, 57) {
+                        true => Some(D9)
+                        false => None
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  pub theorem of_byte_byte(d: Digit): Digit::of_byte(Digit::byte(d)) = Some(d) {
+    match d {
+      D0 => Refl
+      D1 => Refl
+      D2 => Refl
+      D3 => Refl
+      D4 => Refl
+      D5 => Refl
+      D6 => Refl
+      D7 => Refl
+      D8 => Refl
+      D9 => Refl
+    }
+  }
+
+  // No digit is a line feed.
+  pub theorem byte_not_lf(d: Digit): Nat::eq(Digit::byte(d), 10) = false {
+    match d {
+      D0 => Refl
+      D1 => Refl
+      D2 => Refl
+      D3 => Refl
+      D4 => Refl
+      D5 => Refl
+      D6 => Refl
+      D7 => Refl
+      D8 => Refl
+      D9 => Refl
+    }
+  }
+}
+
+pub module Lead {
+  pub fn value(d: Lead): Nat {
+    match d { L1 => 1, L2 => 2, L3 => 3, L4 => 4, L5 => 5, L6 => 6, L7 => 7, L8 => 8, L9 => 9 }
+  }
+
+  // The ASCII byte of the digit.
+  pub fn byte(d: Lead): Nat {
+    Nat::add(Lead::value(d), 48)
+  }
+
+  // The digit of an ASCII byte, if it is one.
+  pub fn of_byte(b: Nat): Option(Lead) {
+    match Nat::eq(b, 49) {
+      true => Some(L1)
+      false => ⊢ Option(Lead) from match Nat::eq(b, 50) {
+        true => Some(L2)
+        false => ⊢ Option(Lead) from match Nat::eq(b, 51) {
+          true => Some(L3)
+          false => ⊢ Option(Lead) from match Nat::eq(b, 52) {
+            true => Some(L4)
+            false => ⊢ Option(Lead) from match Nat::eq(b, 53) {
+              true => Some(L5)
+              false => ⊢ Option(Lead) from match Nat::eq(b, 54) {
+                true => Some(L6)
+                false => ⊢ Option(Lead) from match Nat::eq(b, 55) {
+                  true => Some(L7)
+                  false => ⊢ Option(Lead) from match Nat::eq(b, 56) {
+                    true => Some(L8)
+                    false => ⊢ Option(Lead) from match Nat::eq(b, 57) {
+                      true => Some(L9)
+                      false => None
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  pub theorem of_byte_byte(d: Lead): Lead::of_byte(Lead::byte(d)) = Some(d) {
+    match d {
+      L1 => Refl
+      L2 => Refl
+      L3 => Refl
+      L4 => Refl
+      L5 => Refl
+      L6 => Refl
+      L7 => Refl
+      L8 => Refl
+      L9 => Refl
+    }
+  }
+
+  // No digit is a line feed.
+  pub theorem byte_not_lf(d: Lead): Nat::eq(Lead::byte(d), 10) = false {
+    match d {
+      L1 => Refl
+      L2 => Refl
+      L3 => Refl
+      L4 => Refl
+      L5 => Refl
+      L6 => Refl
+      L7 => Refl
+      L8 => Refl
+      L9 => Refl
+    }
+  }
+}
+
+pub module Status {
+  pub fn code(s: Status): Nat {
+    match s {
+      Mk(l, t, o) => Nat::add(
+        Nat::add(Nat::mul(100, Lead::value(l)), Nat::mul(10, Digit::value(t))),
+        Digit::value(o)
+      )
+    }
+  }
+
+  // The three ASCII digits of the status.
+  pub fn bytes(s: Status): List(Nat) {
+    match s {
+      Mk(l, t, o) => Cons(Lead::byte(l), Cons(Digit::byte(t), Cons(Digit::byte(o), Nil)))
+    }
+  }
+
+  pub fn of_parts(l: Option(Lead), t: Option(Digit), o: Option(Digit)): Option(Status) {
+    match l {
+      None => None
+      Some(x) => ⊢ Option(Status) from match t {
+        None => None
+        Some(y) => ⊢ Option(Status) from match o {
+          None => None
+          Some(z) => Some(Status::Mk(x, y, z))
+        }
+      }
+    }
+  }
+
+  // The status written by three ASCII bytes, if they are three digits and the first is not 0.
+  pub fn of_bytes(a: Nat, b: Nat, c: Nat): Option(Status) {
+    Status::of_parts(Lead::of_byte(a), Digit::of_byte(b), Digit::of_byte(c))
+  }
+
+  // The status at the front of `l`: its first three bytes.
+  pub fn read(l: List(Nat)): Option(Status) {
+    match l {
+      Nil => None
+      Cons(a, r1) => ⊢ Option(Status) from match r1 {
+        Nil => None
+        Cons(b, r2) => ⊢ Option(Status) from match r2 {
+          Nil => None
+          Cons(c, r3) => Status::of_bytes(a, b, c)
+        }
+      }
+    }
+  }
+
+  // Every status reads back as itself.
+  pub theorem read_bytes(s: Status): Status::read(Status::bytes(s)) = Some(s) {
+    match s {
+      Mk(l, t, o) => Eq::trans(
+        Eq::congr(
+          ⟦Status::of_parts(□, Digit::of_byte(Digit::byte(t)), Digit::of_byte(Digit::byte(o)))⟧,
+          Lead::of_byte_byte(l)
+        ),
+        Eq::trans(
+          Eq::congr(
+            ⟦Status::of_parts(Some(l), □, Digit::of_byte(Digit::byte(o)))⟧,
+            Digit::of_byte_byte(t)
+          ),
+          Eq::congr(⟦Status::of_parts(Some(l), Some(t), □)⟧, Digit::of_byte_byte(o))
+        )
+      )
+    }
+  }
+
+  pub fn r#continue(): Status {
+    Status::Mk(L1, D0, D0)
+  }
+
+  pub fn ok(): Status {
+    Status::Mk(L2, D0, D0)
+  }
+
+  pub fn created(): Status {
+    Status::Mk(L2, D0, D1)
+  }
+
+  pub fn accepted(): Status {
+    Status::Mk(L2, D0, D2)
+  }
+
+  pub fn no_content(): Status {
+    Status::Mk(L2, D0, D4)
+  }
+
+  pub fn moved_permanently(): Status {
+    Status::Mk(L3, D0, D1)
+  }
+
+  pub fn found(): Status {
+    Status::Mk(L3, D0, D2)
+  }
+
+  pub fn see_other(): Status {
+    Status::Mk(L3, D0, D3)
+  }
+
+  pub fn not_modified(): Status {
+    Status::Mk(L3, D0, D4)
+  }
+
+  pub fn temporary_redirect(): Status {
+    Status::Mk(L3, D0, D7)
+  }
+
+  pub fn permanent_redirect(): Status {
+    Status::Mk(L3, D0, D8)
+  }
+
+  pub fn bad_request(): Status {
+    Status::Mk(L4, D0, D0)
+  }
+
+  pub fn unauthorized(): Status {
+    Status::Mk(L4, D0, D1)
+  }
+
+  pub fn forbidden(): Status {
+    Status::Mk(L4, D0, D3)
+  }
+
+  pub fn not_found(): Status {
+    Status::Mk(L4, D0, D4)
+  }
+
+  pub fn method_not_allowed(): Status {
+    Status::Mk(L4, D0, D5)
+  }
+
+  pub fn not_acceptable(): Status {
+    Status::Mk(L4, D0, D6)
+  }
+
+  pub fn request_timeout(): Status {
+    Status::Mk(L4, D0, D8)
+  }
+
+  pub fn conflict(): Status {
+    Status::Mk(L4, D0, D9)
+  }
+
+  pub fn gone(): Status {
+    Status::Mk(L4, D1, D0)
+  }
+
+  pub fn length_required(): Status {
+    Status::Mk(L4, D1, D1)
+  }
+
+  pub fn content_too_large(): Status {
+    Status::Mk(L4, D1, D3)
+  }
+
+  pub fn uri_too_long(): Status {
+    Status::Mk(L4, D1, D4)
+  }
+
+  pub fn unsupported_media_type(): Status {
+    Status::Mk(L4, D1, D5)
+  }
+
+  pub fn unprocessable_content(): Status {
+    Status::Mk(L4, D2, D2)
+  }
+
+  pub fn too_many_requests(): Status {
+    Status::Mk(L4, D2, D9)
+  }
+
+  pub fn request_header_fields_too_large(): Status {
+    Status::Mk(L4, D3, D1)
+  }
+
+  pub fn internal_server_error(): Status {
+    Status::Mk(L5, D0, D0)
+  }
+
+  pub fn not_implemented(): Status {
+    Status::Mk(L5, D0, D1)
+  }
+
+  pub fn bad_gateway(): Status {
+    Status::Mk(L5, D0, D2)
+  }
+
+  pub fn service_unavailable(): Status {
+    Status::Mk(L5, D0, D3)
+  }
+
+  pub fn gateway_timeout(): Status {
+    Status::Mk(L5, D0, D4)
+  }
+
+}

@@ -1,0 +1,28 @@
+// What a call gives back: a response, or an error.
+pub(open) inductive Outcome(Res: Type, E: Type): Type {
+  Ok(r: Res): Outcome(Res, E)
+  Err(e: E): Outcome(Res, E)
+}
+
+// A service answers a request with a response or an error and moves its state
+// along: `(S, Req) -> @outcome Outcome(Res, E) × @state S`. A service with nothing to remember
+// uses `S = ()`. Time and capacity are part of the state, so a middleware that
+// counts or refills is an ordinary function and its behaviour can be proved.
+pub(open) inductive Service(S: Type, Req: Type, Res: Type, E: Type): Type {
+  Mk(call: (S, Req) -> @outcome Outcome(Res, E) × @state S): Service(S, Req, Res, E)
+}
+
+pub fn service_call<S, Req, Res, E>(
+  svc: Service(S, Req, Res, E),
+  s: S,
+  r: Req
+): @outcome Outcome(Res, E) × @state S {
+  match svc {
+    Mk(f) => f(s, r)
+  }
+}
+
+// A service that does not use its state, from a function. The state passes through.
+pub fn service_fn<S, Req, Res, E>(f: (Req) -> Outcome(Res, E)): Service(S, Req, Res, E) {
+  Service::Mk((s: S, r: Req) => #(@outcome f(r), @state s))
+}

@@ -1,0 +1,749 @@
+import std::base { List }
+import std::list { List }
+import std::text { Text }
+import "bytes.taut" { byte_list_eq, bytes_eq_ci }
+import "status.taut" { Status }
+
+// Requests and responses as the handlers see them.
+
+pub(open) inductive Method: Type {
+  Get: Method
+  Post: Method
+  Put: Method
+  Delete: Method
+  Patch: Method
+  Head: Method
+  Options: Method
+}
+
+pub module Method {
+  pub fn text(m: Method): Text {
+    match m {
+      Get => "GET"
+      Post => "POST"
+      Put => "PUT"
+      Delete => "DELETE"
+      Patch => "PATCH"
+      Head => "HEAD"
+      Options => "OPTIONS"
+    }
+  }
+
+  pub fn bytes(m: Method): List(Nat) {
+    Text::bytes(Method::text(m))
+  }
+
+  pub fn try(m: Method, b: List(Nat), other: Option(Method)): Option(Method) {
+    match byte_list_eq(Method::bytes(m), b) {
+      true => Some(m)
+      false => other
+    }
+  }
+
+  // The method a request line names. Method names are case-sensitive.
+  pub fn of(b: List(Nat)): Option(Method) {
+    Method::try(
+      Get,
+      b,
+      Method::try(
+        Post,
+        b,
+        Method::try(
+          Put,
+          b,
+          Method::try(
+            Delete,
+            b,
+            Method::try(Patch, b, Method::try(Head, b, Method::try(Options, b, None)))
+          )
+        )
+      )
+    )
+  }
+
+  pub theorem of_bytes(m: Method): Method::of(Method::bytes(m)) = Some(m) {
+    match m {
+      Get => Refl
+      Post => Refl
+      Put => Refl
+      Delete => Refl
+      Patch => Refl
+      Head => Refl
+      Options => Refl
+    }
+  }
+
+  pub fn index(m: Method): Nat {
+    match m { Get => 0, Post => 1, Put => 2, Delete => 3, Patch => 4, Head => 5, Options => 6 }
+  }
+
+  pub fn eq(a: Method, b: Method): Bool {
+    Nat::eq(Method::index(a), Method::index(b))
+  }
+
+  pub theorem eq_refl(m: Method): Method::eq(m, m) = true {
+    Nat::eq_refl(Method::index(m))
+  }
+}
+
+pub module Header {
+  // A header is a name and a value. Names compare without ASCII case.
+  pub fn name(h: @name Text × @value Text): Text {
+    (h: @name Text)
+  }
+
+  pub fn value(h: @name Text × @value Text): Text {
+    (h: @value Text)
+  }
+
+  pub fn pick(y: Bool, h: @name Text × @value Text, rest: Option(Text)): Option(Text) {
+    match y {
+      true => Some((h: @value Text))
+      false => rest
+    }
+  }
+
+  // The value of the first header called `name`.
+  pub fn get(hs: List(@name Text × @value Text), name: Text): Option(Text) {
+    match hs {
+      Nil => None
+      Cons(h, t) => Header::pick(
+        bytes_eq_ci(Text::bytes((h: @name Text)), Text::bytes(name)),
+        h,
+        Header::get(t, name)
+      )
+    }
+  }
+
+  pub fn pick_all(y: Bool, h: @name Text × @value Text, rest: List(Text)): List(Text) {
+    match y {
+      true => Cons((h: @value Text), rest)
+      false => rest
+    }
+  }
+
+  // The values of all the headers called `name`, in order.
+  pub fn get_all(hs: List(@name Text × @value Text), name: Text): List(Text) {
+    match hs {
+      Nil => Nil
+      Cons(h, t) => Header::pick_all(
+        bytes_eq_ci(Text::bytes((h: @name Text)), Text::bytes(name)),
+        h,
+        Header::get_all(t, name)
+      )
+    }
+  }
+
+  pub fn first_value(vs: List(Text)): Option(Text) {
+    match vs {
+      Nil => None
+      Cons(v, rest) => Some(v)
+    }
+  }
+
+  pub theorem pick_first(
+    y: Bool,
+    h: @name Text × @value Text,
+    rest: Option(Text),
+    later: List(Text),
+    e: rest = Header::first_value(later)
+  ): Header::pick(y, h, rest) = Header::first_value(Header::pick_all(y, h, later)) {
+    match y { true => Refl, false => e }
+  }
+
+  // `get` is the first of `get_all`.
+  pub theorem get_first(
+    hs: List(@name Text × @value Text),
+    name: Text
+  ): Header::get(hs, name) = Header::first_value(Header::get_all(hs, name)) {
+    match hs {
+      Nil => Refl
+      Cons(h, t) => Header::pick_first(
+        bytes_eq_ci(Text::bytes((h: @name Text)), Text::bytes(name)),
+        h,
+        Header::get(t, name),
+        Header::get_all(t, name),
+        Header::get_first(t, name)
+      )
+    }
+  }
+
+  // A header name is one or more `tchar`s.
+  pub fn name_valid(n: Text): Bool {
+    not(Nat::eq(Text::len(n), 0)) && Text::all_bytes(n, tchar_byte)
+  }
+
+  pub fn value_valid(v: Text): Bool {
+    Text::all_bytes(v, field_byte)
+  }
+
+  pub fn valid(h: @name Text × @value Text): Bool {
+    Header::name_valid((h: @name Text)) && Header::value_valid((h: @value Text))
+  }
+
+  pub fn valid_text(h: @name Text × @value Text): Bool {
+    (
+      not(
+        Nat::eq(Text::len((h: @name Text)), 0)
+      ) && all_text_bytes((c: Nat) => tchar_byte(c), (h: @name Text))
+    ) && all_text_bytes((c: Nat) => field_byte(c), (h: @value Text))
+  }
+
+  pub theorem valid_text_eq(h: @name Text × @value Text): Header::valid_text(h) = Header::valid(h) {
+    Eq::trans(
+      Eq::congr(
+        ⟦(
+          not(Nat::eq(Text::len((h: @name Text)), 0)) && □
+        ) && all_text_bytes((c: Nat) => field_byte(c), (h: @value Text))⟧,
+        Eq::trans(
+          all_text_from_eq(
+            (c: Nat) => tchar_byte(c),
+            (h: @name Text),
+            0,
+            Text::len((h: @name Text))
+          ),
+          all_from_all((c: Nat) => tchar_byte(c), Text::bytes((h: @name Text)))
+        )
+      ),
+      Eq::congr(
+        ⟦(
+          not(
+            Nat::eq(Text::len((h: @name Text)), 0)
+          ) && List::all((c: Nat) => tchar_byte(c), Text::bytes((h: @name Text)))
+        ) && □⟧,
+        Eq::trans(
+          all_text_from_eq(
+            (c: Nat) => field_byte(c),
+            (h: @value Text),
+            0,
+            Text::len((h: @value Text))
+          ),
+          all_from_all((c: Nat) => field_byte(c), Text::bytes((h: @value Text)))
+        )
+      )
+    )
+  }
+
+  pub fn gate(y: Bool, r: HttpResponse): HttpResponse {
+    match y {
+      true => r
+      false => invalid_header_response()
+    }
+  }
+}
+
+// `method path?query`, the headers in order, and the body.
+pub(open) inductive HttpRequest: Type {
+  Mk(
+    method: Method,
+    path: Text,
+    query: Option(Text),
+    headers: List(@name Text × @value Text),
+    body: Text
+  ): HttpRequest
+}
+
+pub module HttpRequest {
+  pub fn method(r: HttpRequest): Method {
+    match r {
+      Mk(m, p, q, hs, b) => m
+    }
+  }
+
+  pub fn path(r: HttpRequest): Text {
+    match r {
+      Mk(m, p, q, hs, b) => p
+    }
+  }
+
+  pub fn query(r: HttpRequest): Option(Text) {
+    match r {
+      Mk(m, p, q, hs, b) => q
+    }
+  }
+
+  pub fn headers(r: HttpRequest): List(@name Text × @value Text) {
+    match r {
+      Mk(m, p, q, hs, b) => hs
+    }
+  }
+
+  pub fn body(r: HttpRequest): Text {
+    match r {
+      Mk(m, p, q, hs, b) => b
+    }
+  }
+
+  pub fn header(r: HttpRequest, name: Text): Option(Text) {
+    Header::get(HttpRequest::headers(r), name)
+  }
+
+  // The values of all the headers called `name`, in order.
+  pub fn header_all(r: HttpRequest, name: Text): List(Text) {
+    Header::get_all(HttpRequest::headers(r), name)
+  }
+}
+
+pub fn make_request(
+  m: Method,
+  path: Text,
+  q: Option(Text),
+  hs: List(@name Text × @value Text),
+  body: Text
+): HttpRequest {
+  HttpRequest::Mk(m, path, q, hs, body)
+}
+
+// A request with no query, headers or body.
+pub fn simple_request(m: Method, path: Text): HttpRequest {
+  HttpRequest::Mk(m, path, None, Nil, "")
+}
+
+pub(open) inductive HttpResponse: Type {
+  Mk(status: Status, headers: List(@name Text × @value Text), body: Text): HttpResponse
+}
+
+pub module HttpResponse {
+  pub fn status(r: HttpResponse): Status {
+    match r {
+      Mk(s, hs, b) => s
+    }
+  }
+
+  pub fn headers(r: HttpResponse): List(@name Text × @value Text) {
+    match r {
+      Mk(s, hs, b) => hs
+    }
+  }
+
+  pub fn body(r: HttpResponse): Text {
+    match r {
+      Mk(s, hs, b) => b
+    }
+  }
+
+  pub fn header(r: HttpResponse, name: Text): Option(Text) {
+    Header::get(HttpResponse::headers(r), name)
+  }
+}
+
+// A `tchar` of RFC 9110: a visible ASCII byte that is not one of the separators
+// ( )< > @ , ; : \ " / [ ] ? = { }. The separators are compared one by one,
+// as `List::all` over their list unfolds, so a program needs no list or closure.
+pub fn tchar_byte(c: Nat): Bool {
+  Nat::lt(
+    32,
+    c
+  ) && Bool::and(
+    Nat::lt(c, 127),
+    not(
+      Nat::eq(c, 40)
+    ) && not(
+      Nat::eq(c, 41)
+    ) && not(
+      Nat::eq(c, 60)
+    ) && not(
+      Nat::eq(c, 62)
+    ) && not(
+      Nat::eq(c, 64)
+    ) && not(
+      Nat::eq(c, 44)
+    ) && not(
+      Nat::eq(c, 59)
+    ) && not(
+      Nat::eq(c, 58)
+    ) && not(
+      Nat::eq(c, 92)
+    ) && not(
+      Nat::eq(c, 34)
+    ) && not(
+      Nat::eq(c, 47)
+    ) && not(
+      Nat::eq(c, 91)
+    ) && not(
+      Nat::eq(c, 93)
+    ) && not(
+      Nat::eq(c, 63)
+    ) && not(Nat::eq(c, 61)) && not(Nat::eq(c, 123)) && not(Nat::eq(c, 125)) && true
+  )
+}
+
+// A byte of a field value: tab, visible ASCII, space, or a byte of UTF-8 text.
+// Not CR, LF, NUL or another control byte, so a value cannot end its line.
+pub fn field_byte(c: Nat): Bool {
+  Nat::eq(c, 9) || (Nat::lt(31, c) && not(Nat::eq(c, 127)))
+}
+
+pub fn headers_valid(hs: List(@name Text × @value Text)): Bool {
+  List::all((h: @name Text × @value Text) => Header::valid(h), hs)
+}
+
+// `List::all(p, bs)` read by position: whether `p` holds for the `k` elements
+// of `bs` from `i` on.
+pub fn all_from<A: Shared>(p: (A) -> Bool, bs: List(A), i: Nat, k: Nat): Bool {
+  match k {
+    Zero => true
+    Succ(k2) => ⊢ Bool from match List::nth(bs, i) {
+      None => true
+      Some(b) => p(b) && all_from(p, bs, Succ(i), k2)
+    }
+  }
+}
+
+pub theorem all_from_shift<A: Type>(
+  p: (A) -> Bool,
+  h: A,
+  t: List(A),
+  i: Nat,
+  k: Nat
+): all_from(p, Cons(h, t), Succ(i), k) = all_from(p, t, i, k) {
+  match k {
+    Zero => Refl
+    Succ(k2) => Eq::congr(
+      (z: Bool) => (⊢ Bool from match List::nth(t, i) {
+        None => true
+        Some(b) => p(b) && z
+      }),
+      all_from_shift(p, h, t, Succ(i), k2)
+    )
+  }
+}
+
+pub theorem all_from_all<A: Type>(
+  p: (A) -> Bool,
+  bs: List(A)
+): all_from(p, bs, 0, List::length(bs)) = List::all(p, bs) {
+  match bs {
+    Nil => Refl
+    Cons(h, t) => Eq::congr(
+      ⟦p(h) && □⟧,
+      Eq::trans(all_from_shift(p, h, t, 0, List::length(t)), all_from_all(p, t))
+    )
+  }
+}
+
+// Whether `p` holds for every byte of `t`, read with `Text::byte`: extraction
+// reads the native text and builds no list of bytes.
+pub fn all_text_from(p: (Nat) -> Bool, t: Text, i: Nat, k: Nat): Bool {
+  match k {
+    Zero => true
+    Succ(k2) => ⊢ Bool from match Text::byte(t, i) {
+      None => true
+      Some(b) => p(b) && all_text_from(p, t, Succ(i), k2)
+    }
+  }
+}
+
+pub theorem all_text_from_eq(
+  p: (Nat) -> Bool,
+  t: Text,
+  i: Nat,
+  k: Nat
+): all_text_from(p, t, i, k) = all_from(p, Text::bytes(t), i, k) {
+  match k {
+    Zero => Refl
+    Succ(k2) => Eq::congr(
+      (z: Bool) => (⊢ Bool from match List::nth(Text::bytes(t), i) {
+        None => true
+        Some(b) => p(b) && z
+      }),
+      all_text_from_eq(p, t, Succ(i), k2)
+    )
+  }
+}
+
+pub fn all_text_bytes(p: (Nat) -> Bool, t: Text): Bool {
+  all_text_from(p, t, 0, Text::len(t))
+}
+
+pub fn headers_valid_text(hs: List(@name Text × @value Text)): Bool {
+  match hs {
+    Nil => true
+    Cons(h, t) => Header::valid_text(h) && headers_valid_text(t)
+  }
+}
+
+pub theorem headers_valid_text_eq(
+  hs: List(@name Text × @value Text)
+): headers_valid_text(hs) = headers_valid(hs) {
+  match hs {
+    Nil => Refl
+    Cons(h, t) => Eq::trans(
+      Eq::congr(⟦□ && headers_valid_text(t)⟧, Header::valid_text_eq(h)),
+      Eq::congr(⟦Header::valid(h) && □⟧, headers_valid_text_eq(t))
+    )
+  }
+}
+
+// What goes out in place of a response with a header that may not be sent: a
+// bad name or value is a bug in the server, and sending it could split the response.
+pub fn invalid_header_response(): HttpResponse {
+  HttpResponse::Mk(
+    Status::internal_server_error(),
+    Cons(#(@name "content-type", @value "text/plain; charset=utf-8"), Nil),
+    "invalid response header"
+  )
+}
+
+// The same response with one more header, after the others. A name that is
+// not a token, or a value with CR, LF or another control byte, turns the
+// response into `invalid_header_response()`.
+pub fn with_header(r: HttpResponse, name: Text, value: Text): HttpResponse {
+  match r {
+    Mk(s, hs, b) => Header::gate(
+      Header::name_valid(name) && Header::value_valid(value),
+      HttpResponse::Mk(s, List::append(hs, Cons(#(@name name, @value value), Nil)), b)
+    )
+  }
+}
+
+pub fn with_status(r: HttpResponse, status: Status): HttpResponse {
+  match r {
+    Mk(s, hs, b) => HttpResponse::Mk(status, hs, b)
+  }
+}
+
+pub fn content_type(r: HttpResponse, t: Text): HttpResponse {
+  with_header(r, "content-type", t)
+}
+
+pub fn plain(status: Status, body: Text): HttpResponse {
+  HttpResponse::Mk(
+    status,
+    Cons(#(@name "content-type", @value "text/plain; charset=utf-8"), Nil),
+    body
+  )
+}
+
+pub fn html(status: Status, body: Text): HttpResponse {
+  HttpResponse::Mk(
+    status,
+    Cons(#(@name "content-type", @value "text/html; charset=utf-8"), Nil),
+    body
+  )
+}
+
+pub fn empty(status: Status): HttpResponse {
+  HttpResponse::Mk(status, Nil, "")
+}
+
+// `303 See Other` to `location`.
+pub fn redirect(location: Text): HttpResponse {
+  HttpResponse::Mk(Status::see_other(), Cons(#(@name "location", @value location), Nil), "")
+}
+
+pub fn not_found(): HttpResponse {
+  plain(Status::not_found(), "Not Found")
+}
+
+pub fn bad_request(why: Text): HttpResponse {
+  plain(Status::bad_request(), why)
+}
+
+// The reason phrases of the statuses of RFC 9110 (section 15), and the ones of RFC 6585
+// used here (428, 429 and 431), by status code. 306 is unused and has none.
+pub fn reasons(): List(Nat × Text) {
+  Cons(
+    #(100, "Continue"),
+    Cons(
+      #(101, "Switching Protocols"),
+      Cons(
+        #(200, "OK"),
+        Cons(
+          #(201, "Created"),
+          Cons(
+            #(202, "Accepted"),
+            Cons(
+              #(203, "Non-Authoritative Information"),
+              Cons(
+                #(204, "No Content"),
+                Cons(
+                  #(205, "Reset Content"),
+                  Cons(
+                    #(206, "Partial Content"),
+                    Cons(
+                      #(300, "Multiple Choices"),
+                      Cons(
+                        #(301, "Moved Permanently"),
+                        Cons(
+                          #(302, "Found"),
+                          Cons(
+                            #(303, "See Other"),
+                            Cons(
+                              #(304, "Not Modified"),
+                              Cons(
+                                #(305, "Use Proxy"),
+                                Cons(
+                                  #(307, "Temporary Redirect"),
+                                  Cons(
+                                    #(308, "Permanent Redirect"),
+                                    Cons(
+                                      #(400, "Bad Request"),
+                                      Cons(
+                                        #(401, "Unauthorized"),
+                                        Cons(
+                                          #(402, "Payment Required"),
+                                          Cons(
+                                            #(403, "Forbidden"),
+                                            Cons(
+                                              #(404, "Not Found"),
+                                              Cons(
+                                                #(405, "Method Not Allowed"),
+                                                Cons(
+                                                  #(406, "Not Acceptable"),
+                                                  Cons(
+                                                    #(407, "Proxy Authentication Required"),
+                                                    Cons(
+                                                      #(408, "Request Timeout"),
+                                                      Cons(
+                                                        #(409, "Conflict"),
+                                                        Cons(
+                                                          #(410, "Gone"),
+                                                          Cons(
+                                                            #(411, "Length Required"),
+                                                            Cons(
+                                                              #(412, "Precondition Failed"),
+                                                              Cons(
+                                                                #(413, "Content Too Large"),
+                                                                Cons(
+                                                                  #(414, "URI Too Long"),
+                                                                  Cons(
+                                                                    #(
+                                                                      415,
+                                                                      "Unsupported Media Type"
+                                                                    ),
+                                                                    Cons(
+                                                                      #(
+                                                                        416,
+                                                                        "Range Not Satisfiable"
+                                                                      ),
+                                                                      Cons(
+                                                                        #(
+                                                                          417,
+                                                                          "Expectation Failed"
+                                                                        ),
+                                                                        Cons(
+                                                                          #(
+                                                                            421,
+                                                                            "Misdirected Request"
+                                                                          ),
+                                                                          Cons(
+                                                                            #(
+                                                                              422,
+                                                                              "Unprocessable Content"
+                                                                            ),
+                                                                            Cons(
+                                                                              #(
+                                                                                426,
+                                                                                "Upgrade Required"
+                                                                              ),
+                                                                              Cons(
+                                                                                #(
+                                                                                  428,
+                                                                                  "Precondition Required"
+                                                                                ),
+                                                                                Cons(
+                                                                                  #(
+                                                                                    429,
+                                                                                    "Too Many Requests"
+                                                                                  ),
+                                                                                  Cons(
+                                                                                    #(
+                                                                                      431,
+                                                                                      "Request Header Fields Too Large"
+                                                                                    ),
+                                                                                    Cons(
+                                                                                      #(
+                                                                                        500,
+                                                                                        "Internal Server Error"
+                                                                                      ),
+                                                                                      Cons(
+                                                                                        #(
+                                                                                          501,
+                                                                                          "Not Implemented"
+                                                                                        ),
+                                                                                        Cons(
+                                                                                          #(
+                                                                                            502,
+                                                                                            "Bad Gateway"
+                                                                                          ),
+                                                                                          Cons(
+                                                                                            #(
+                                                                                              503,
+                                                                                              "Service Unavailable"
+                                                                                            ),
+                                                                                            Cons(
+                                                                                              #(
+                                                                                                504,
+                                                                                                "Gateway Timeout"
+                                                                                              ),
+                                                                                              Cons(
+                                                                                                #(
+                                                                                                  505,
+                                                                                                  "HTTP Version Not Supported"
+                                                                                                ),
+                                                                                                Nil
+                                                                                              )
+                                                                                            )
+                                                                                          )
+                                                                                        )
+                                                                                      )
+                                                                                    )
+                                                                                  )
+                                                                                )
+                                                                              )
+                                                                            )
+                                                                          )
+                                                                        )
+                                                                      )
+                                                                    )
+                                                                  )
+                                                                )
+                                                              )
+                                                            )
+                                                          )
+                                                        )
+                                                      )
+                                                    )
+                                                  )
+                                                )
+                                              )
+                                            )
+                                          )
+                                        )
+                                      )
+                                    )
+                                  )
+                                )
+                              )
+                            )
+                          )
+                        )
+                      )
+                    )
+                  )
+                )
+              )
+            )
+          )
+        )
+      )
+    )
+  )
+}
+
+pub fn reason_pick(y: Bool, here: Text, later: Text): Text {
+  match y { true => here, false => later }
+}
+
+pub fn reason_in(s: Nat, l: List(Nat × Text)): Text {
+  match l {
+    Nil => ""
+    Cons(p, t) => reason_pick(Nat::eq((p: Nat), s), (p: Text), reason_in(s, t))
+  }
+}
+
+// The reason phrase of a status code; "" for a code without one.
+pub fn reason(s: Status): Text {
+  reason_in(Status::code(s), reasons())
+}

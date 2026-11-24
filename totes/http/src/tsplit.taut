@@ -1,0 +1,392 @@
+import std::base { List }
+import std::list { List }
+import std::nat { Nat }
+import std::text { Text }
+import std::text_ops { Bytes, Text }
+import "frame.taut" { between, between_same, between_snoc, le_self }
+import "at.taut" { opt_cases, take_between }
+
+// Splitting a text on a byte, reading it where it is: `Text::byte` finds each
+// separator and `Text::slice` cuts each piece, as `Text::split_on` says.
+
+pub fn nosep(sep: Nat, p: List(Nat)): Bool {
+  match p {
+    Nil => true
+    Cons(h, t) => ⊢ Bool from match h == sep {
+      true => false
+      false => nosep(sep, t)
+    }
+  }
+}
+
+// The bytes of `t` from `s` up to `e`.
+pub fn cut_text(t: Text, s: Nat, e: Nat): Text {
+  match Text::slice(t, s, e) {
+    None => Text::Mk(between(Text::bytes(t), s, e))
+    Some(x) => x
+  }
+}
+
+// The pieces of `t` from `s`, the current one begun at `s` and read up to `i`.
+pub fn split_from(t: Text, sep: Nat, s: Nat, i: Nat, k: Nat): List(Text) {
+  match k {
+    Zero => Cons(cut_text(t, s, i), Nil)
+    Succ(k2) => ⊢ List(Text) from match Text::byte(t, i) {
+      None => Cons(cut_text(t, s, i), Nil)
+      Some(b) => ⊢ List(Text) from match b == sep {
+        true => Cons(cut_text(t, s, i), split_from(t, sep, Succ(i), Succ(i), k2))
+        false => split_from(t, sep, s, Succ(i), k2)
+      }
+    }
+  }
+}
+
+// `Text::split_on(t, sep)`, read where the bytes are.
+pub fn split_text(t: Text, sep: Nat): List(Text) {
+  split_from(t, sep, 0, 0, Text::len(t))
+}
+
+// ---- why it is `Text::split_on` -------------------------------------------------------
+
+pub fn prep(p: List(Nat), q: List(List(Nat)) × List(Nat)): List(List(Nat)) × List(Nat) {
+  match q {
+    #(a, c) => #(a, List::append(p, c))
+  }
+}
+
+pub theorem prep_nil(q: List(List(Nat)) × List(Nat)): prep(Nil, q) = q {
+  match q {
+    #(a, c) => Refl
+  }
+}
+
+pub theorem prep_step(
+  h: Nat,
+  sep: Nat,
+  p: List(Nat),
+  q: List(List(Nat)) × List(Nat),
+  hh: (h == sep) = false
+): Bytes::split_step(h, sep, prep(p, q)) = prep(Cons(h, p), q) {
+  match q {
+    #(a, c) => Eq::congr(
+      (y: Bool) => (⊢ List(List(Nat)) × List(Nat) from match y {
+        true => #(Cons(List::append(p, c), a), List::Nil(<A: Nat>))
+        false => #(a, Cons(h, List::append(p, c)))
+      }),
+      hh
+    )
+  }
+}
+
+// A piece without the separator goes in front of the first part.
+pub theorem split_prefix(
+  sep: Nat,
+  p: List(Nat),
+  r: List(Nat),
+  hn: nosep(sep, p) = true
+): Bytes::split(List::append(p, r), sep) = prep(p, Bytes::split(r, sep)) {
+  match p {
+    Nil => Eq::sym(prep_nil(Bytes::split(r, sep)))
+    Cons(h, t) => ((hn1: (⊢ Bool from match h == sep { true => false, false => nosep(sep, t) }) = true) =>
+      ⊢ Bytes::split(List::append(Cons(h, t), r), sep) = prep(Cons(h, t), Bytes::split(r, sep)) from match h == sep eqn ye {
+        false => Eq::trans(
+          Eq::congr(⟦Bytes::split_step(h, sep, □)⟧, split_prefix(sep, t, r, hn1)),
+          prep_step(h, sep, t, Bytes::split(r, sep), ye)
+        )
+        true => False::elim(false_ne_true(hn1))
+      })(hn)
+  }
+}
+
+pub theorem nosep_snoc(
+  sep: Nat,
+  p: List(Nat),
+  x: Nat,
+  hn: nosep(sep, p) = true,
+  hx: (x == sep) = false
+): nosep(sep, List::append(p, Cons(x, Nil))) = true {
+  match p {
+    Nil => Eq::congr((y: Bool) => (⊢ Bool from match y { true => false, false => true }), hx)
+    Cons(h, t) => ((hn1: (⊢ Bool from match h == sep { true => false, false => nosep(sep, t) }) = true) =>
+      ⊢ (⊢ Bool from match h == sep {
+        true => false
+        false => nosep(sep, List::append(t, Cons(x, Nil)))
+      }) = true from match h == sep eqn ye {
+        false => nosep_snoc(sep, t, x, hn1, hx)
+        true => False::elim(false_ne_true(hn1))
+      })(hn)
+  }
+}
+
+pub theorem drop_some<A: Type>(
+  l: List(A),
+  i: Nat,
+  x: A,
+  ho: List::nth(l, i) = Some(x)
+): List::drop(i, l) = Cons(x, List::drop(Succ(i), l)) {
+  match l {
+    Nil => False::elim(
+      false_ne_true(
+        Eq::congr((o: Option(A)) => (⊢ Bool from match o { None => false, Some(y) => true }), ho)
+      )
+    )
+    Cons(h, t) => ⊢ List::drop(
+      i,
+      Cons(h, t)
+    ) = Cons(x, List::drop(Succ(i), Cons(h, t))) from match i {
+      Zero => Eq::congr(
+        ⟦Cons(□, t)⟧,
+        Eq::congr((o: Option(A)) => (⊢ A from match o { None => h, Some(y) => y }), ho)
+      )
+      Succ(j) => drop_some(t, j, x, ho)
+    }
+  }
+}
+
+pub theorem drop_none<A: Type>(
+  l: List(A),
+  i: Nat,
+  ho: List::nth(l, i) = None
+): List::drop(i, l) = Nil {
+  match l {
+    Nil => ⊢ List::drop(i, List::Nil(<A: A>)) = Nil from match i {
+      Zero => Refl
+      Succ(j) => Refl
+    }
+    Cons(h, t) => ⊢ List::drop(i, Cons(h, t)) = Nil from match i {
+      Zero => False::elim(
+        false_ne_true(
+          Eq::congr((o: Option(A)) => (⊢ Bool from match o { None => true, Some(y) => false }), ho)
+        )
+      )
+      Succ(j) => drop_none(t, j, ho)
+    }
+  }
+}
+
+pub theorem nil_of_len<A: Type>(l: List(A), h: (List::length(l) <= Zero) = true): l = Nil {
+  match l {
+    Nil => Refl
+    Cons(x, t) => False::elim(false_ne_true(h))
+  }
+}
+
+pub fn cut_of(o: Option(Text), fb: Text): Text {
+  match o {
+    None => fb
+    Some(x) => x
+  }
+}
+
+pub theorem cut_eq(
+  t: Text,
+  s: Nat,
+  e: Nat
+): cut_text(t, s, e) = Text::Mk(between(Text::bytes(t), s, e)) {
+  ⊢ Eq(
+    Text,
+    cut_of(
+      ⊢ Option(Text) from match s <= e && (Text::boundary(t, s) && Text::boundary(t, e)) {
+        false => None
+        true => Some(Text::Mk(List::take(e - s, List::drop(s, Text::bytes(t)))))
+      },
+      Text::Mk(between(Text::bytes(t), s, e))
+    ),
+    Text::Mk(between(Text::bytes(t), s, e))
+  ) from match s <= e && (Text::boundary(t, s) && Text::boundary(t, e)) eqn ge {
+    false => Refl
+    true => Eq::congr((m: List(Nat)) => Text::Mk(m), take_between(Text::bytes(t), s, e))
+  }
+}
+
+pub theorem end_eq(
+  t: Text,
+  sep: Nat,
+  s: Nat,
+  i: Nat,
+  hn: nosep(sep, between(Text::bytes(t), s, i)) = true,
+  hd: List::drop(i, Text::bytes(t)) = Nil
+): Cons(
+  cut_text(t, s, i),
+  Nil
+) = Text::of_split(
+  Bytes::split(List::append(between(Text::bytes(t), s, i), List::drop(i, Text::bytes(t))), sep)
+) {
+  Eq::sym(
+    Eq::trans(
+      Eq::congr(
+        ⟦Text::of_split(Bytes::split(List::append(between(Text::bytes(t), s, i), □), sep))⟧,
+        hd
+      ),
+      Eq::trans(
+        Eq::congr(⟦Text::of_split(□)⟧, split_prefix(sep, between(Text::bytes(t), s, i), Nil, hn)),
+        Eq::trans(
+          Eq::congr(
+            ⟦Cons(Text::Mk(□), List::Nil(<A: Text>))⟧,
+            List::append_nil(between(Text::bytes(t), s, i))
+          ),
+          Eq::sym(Eq::congr(⟦Cons(□, List::Nil(<A: Text>))⟧, cut_eq(t, s, i)))
+        )
+      )
+    )
+  )
+}
+
+pub theorem sep_step(
+  p: List(Nat),
+  b: Nat,
+  sep: Nat,
+  q: List(List(Nat)) × List(Nat),
+  hb: (b == sep) = true
+): Text::of_split(prep(p, Bytes::split_step(b, sep, q))) = Cons(Text::Mk(p), Text::of_split(q)) {
+  match q {
+    #(a, c) => Eq::trans(
+      Eq::congr(
+        (y: Bool) => Text::of_split(prep(p, ⊢ List(List(Nat)) × List(Nat) from match y {
+          true => #(Cons(c, a), List::Nil(<A: Nat>))
+          false => #(a, Cons(b, c))
+        })),
+        hb
+      ),
+      Eq::congr(⟦Cons(Text::Mk(□), Text::of_bytes_list(Cons(c, a)))⟧, List::append_nil(p))
+    )
+  }
+}
+
+pub theorem split_eq(
+  t: Text,
+  sep: Nat,
+  s: Nat,
+  i: Nat,
+  k: Nat,
+  hs: (s <= i) = true,
+  hn: nosep(sep, between(Text::bytes(t), s, i)) = true,
+  hk: (List::length(List::drop(i, Text::bytes(t))) <= k) = true
+): split_from(
+  t,
+  sep,
+  s,
+  i,
+  k
+) = Text::of_split(
+  Bytes::split(List::append(between(Text::bytes(t), s, i), List::drop(i, Text::bytes(t))), sep)
+) {
+  ⊢ split_from(
+    t,
+    sep,
+    s,
+    i,
+    k
+  ) = Text::of_split(
+    Bytes::split(List::append(between(Text::bytes(t), s, i), List::drop(i, Text::bytes(t))), sep)
+  ) from match k {
+    Zero => end_eq(t, sep, s, i, hn, nil_of_len(List::drop(i, Text::bytes(t)), hk))
+    Succ(k2) => opt_cases(
+      (o: Option(Nat)) => Eq(
+        List(Text),
+        ⊢ List(Text) from match o {
+          None => Cons(cut_text(t, s, i), Nil)
+          Some(b) => ⊢ List(Text) from match b == sep {
+            true => Cons(cut_text(t, s, i), split_from(t, sep, Succ(i), Succ(i), k2))
+            false => split_from(t, sep, s, Succ(i), k2)
+          }
+        },
+        Text::of_split(Bytes::split(List::append(between(Text::bytes(t), s, i), List::drop(i, Text::bytes(t))), sep))
+      ),
+      Text::byte(t, i),
+      (oe: Text::byte(t, i) = None) => end_eq(t, sep, s, i, hn, drop_none(Text::bytes(t), i, oe)),
+      (b: Nat) => (oe: Text::byte(t, i) = Some(b)) => Eq::trans(
+        ⊢ Eq(
+          List(Text),
+          ⊢ List(Text) from match b == sep {
+            true => Cons(cut_text(t, s, i), split_from(t, sep, Succ(i), Succ(i), k2))
+            false => split_from(t, sep, s, Succ(i), k2)
+          },
+          Text::of_split(Bytes::split(List::append(between(Text::bytes(t), s, i), Cons(b, List::drop(Succ(i), Text::bytes(t)))), sep))
+        ) from match b == sep eqn ye {
+          false => Eq::trans(
+            split_eq(
+              t, sep, s, Succ(i), k2,
+              Nat::le_trans(s, i, Succ(i), hs, Nat::le_succ(i)),
+              Eq::trans(
+                Eq::congr(⟦nosep(sep, □)⟧, between_snoc(Text::bytes(t), s, i, b, oe, hs)),
+                nosep_snoc(sep, between(Text::bytes(t), s, i), b, hn, ye)
+              ),
+              Eq::trans(
+                Eq::sym(Eq::congr(⟦List::length(□) <= Succ(k2)⟧, drop_some(Text::bytes(t), i, b, oe))),
+                hk
+              )
+            ),
+            Eq::trans(
+              Eq::congr(
+                ⟦Text::of_split(Bytes::split(List::append(□, List::drop(Succ(i), Text::bytes(t))), sep))⟧,
+                between_snoc(Text::bytes(t), s, i, b, oe, hs)
+              ),
+              Eq::congr(
+                ⟦Text::of_split(Bytes::split(□, sep))⟧,
+                List::append_assoc(between(Text::bytes(t), s, i), Cons(b, Nil), List::drop(Succ(i), Text::bytes(t)))
+              )
+            )
+          )
+          true => Eq::trans(
+            Eq::congr(⟦Cons(□, split_from(t, sep, Succ(i), Succ(i), k2))⟧, cut_eq(t, s, i)),
+            Eq::trans(
+              Eq::congr(
+                ⟦Cons(Text::Mk(between(Text::bytes(t), s, i)), □)⟧,
+                Eq::trans(
+                  split_eq(
+                    t, sep, Succ(i), Succ(i), k2,
+                    le_self(Succ(i)),
+                    Eq::congr(⟦nosep(sep, □)⟧, between_same(Text::bytes(t), Succ(i))),
+                    Eq::trans(
+                      Eq::sym(Eq::congr(⟦List::length(□) <= Succ(k2)⟧, drop_some(Text::bytes(t), i, b, oe))),
+                      hk
+                    )
+                  ),
+                  Eq::congr(
+                    ⟦Text::of_split(Bytes::split(List::append(□, List::drop(Succ(i), Text::bytes(t))), sep))⟧,
+                    between_same(Text::bytes(t), Succ(i))
+                  )
+                )
+              ),
+              Eq::sym(
+                Eq::trans(
+                  Eq::congr(
+                    ⟦Text::of_split(□)⟧,
+                    split_prefix(sep, between(Text::bytes(t), s, i), Cons(b, List::drop(Succ(i), Text::bytes(t))), hn)
+                  ),
+                  sep_step(between(Text::bytes(t), s, i), b, sep, Bytes::split(List::drop(Succ(i), Text::bytes(t)), sep), ye)
+                )
+              )
+            )
+          )
+        },
+        Eq::sym(
+          Eq::congr(
+            ⟦Text::of_split(Bytes::split(List::append(between(Text::bytes(t), s, i), □), sep))⟧,
+            drop_some(Text::bytes(t), i, b, oe)
+          )
+        )
+      )
+    )
+  }
+}
+
+pub theorem split_text_eq(t: Text, sep: Nat): split_text(t, sep) = Text::split_on(t, sep) {
+  Eq::trans(
+    split_eq(
+      t,
+      sep,
+      0,
+      0,
+      Text::len(t),
+      Refl,
+      Eq::congr(⟦nosep(sep, □)⟧, between_same(Text::bytes(t), 0)),
+      le_self(List::length(Text::bytes(t)))
+    ),
+    Eq::congr(
+      ⟦Text::of_split(Bytes::split(List::append(□, Text::bytes(t)), sep))⟧,
+      between_same(Text::bytes(t), 0)
+    )
+  )
+}

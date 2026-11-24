@@ -1,0 +1,14 @@
+package {
+  name = "server"
+  version = "0.1.0"
+}
+
+// What the server may reach when it runs:
+// - net: it listens on 127.0.0.1:8080 and nothing else.
+// - div: it serves until it is stopped, so the host's step limit is off.
+trust {
+  run {
+    net = ["127.0.0.1:8080"]
+    div = true
+  }
+}

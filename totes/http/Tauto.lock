@@ -1,0 +1,12 @@
+// Written by `tauto lock` and `tauto update`: the exact commit and content
+// of each tote fetched from Git. Commit it with the project.
+format = 1
+
+@ totes[] {
+  name = "url"
+  git = "https://github.com/Hihaheho/tauto.git"
+  ref = "refs/heads/main"
+  dir = "totes/url"
+  rev = "sha1:e0b36c2b74e4f252549d2bd58e205ad89af58c08"
+  source = "sha256:a4e9f466afdabbcfe308486deda034cd27d8a17bc7ab94de19e72ff78a965c52"
+}

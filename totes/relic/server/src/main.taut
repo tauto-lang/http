@@ -1,0 +1,26 @@
+import "../../../http/src/status.taut" { Status }
+import "../../src/response.taut" { Response, text_response }
+import "../../src/router.taut" { router }
+import std::builtin::par { spawn }
+import "../../src/conn.taut" { ServeIo, TaskIo }
+import "../../src/serve.taut" { serve }
+
+fn healthz(): Response {
+  text_response(Status::ok(), "ok")
+}
+
+fn missing(): Response {
+  text_response(Status::not_found(), "not found")
+}
+
+router!(```
+  Route ! {}
+  /healthz Healthz get: healthz
+  /* NotFound any: missing
+  ```) => enum Route, fn route, fn handler
+
+fn listen() ! {ServeIo, ∀ T. spawn(() -> T ! {TaskIo})} {
+  serve("127.0.0.1:8080", route, handler)
+}
+
+perform main(() => { listen() })

@@ -1,0 +1,140 @@
+import "service.taut" { Outcome, Service, service_call }
+import "layer.taut" { Layer }
+
+// ---- request, response and error mapping ----------------------------------
+
+pub fn map_request<S, R1, R2, Res, E>(
+  f: (R1) -> R2
+): Layer(Service(S, R2, Res, E), Service(S, R1, Res, E)) {
+  Layer::Mk(
+    (svc: Service(S, R2, Res, E)) => Service::Mk((s: S, r: R1) => service_call(svc, s, f(r)))
+  )
+}
+
+pub fn outcome_map<Res, Res2, E, E2>(
+  f: (Res) -> Res2,
+  g: (E) -> E2,
+  o: Outcome(Res, E)
+): Outcome(Res2, E2) {
+  match o {
+    Ok(r) => Ok(f(r))
+    Err(e) => Err(g(e))
+  }
+}
+
+fn map_outcome_pair<S, Res, Res2, E, E2>(
+  f: (Res) -> Res2,
+  g: (E) -> E2,
+  p: @outcome Outcome(Res, E) × @state S
+): @outcome Outcome(Res2, E2) × @state S {
+  match p {
+    #(@outcome o, @state s) => #(@outcome outcome_map(f, g, o), @state s)
+  }
+}
+
+pub fn map_response<S, Req, Res, Res2, E>(
+  f: (Res) -> Res2
+): Layer(Service(S, Req, Res, E), Service(S, Req, Res2, E)) {
+  Layer::Mk(
+    (svc: Service(S, Req, Res, E)) => Service::Mk(
+      (s: S, r: Req) => map_outcome_pair(f, (e: E) => e, service_call(svc, s, r))
+    )
+  )
+}
+
+pub fn map_err<S, Req, Res, E, E2>(
+  g: (E) -> E2
+): Layer(Service(S, Req, Res, E), Service(S, Req, Res, E2)) {
+  Layer::Mk(
+    (svc: Service(S, Req, Res, E)) => Service::Mk(
+      (s: S, r: Req) => map_outcome_pair((x: Res) => x, g, service_call(svc, s, r))
+    )
+  )
+}
+
+// Mapping requests twice is mapping by the composite once.
+pub theorem map_request_then<S: Type, R1: Type, R2: Type, R3: Type, Res: Type, E: Type>(
+  f: (R1) -> R2,
+  g: (R2) -> R3,
+  svc: Service(S, R3, Res, E),
+  s: S,
+  r: R1
+): service_call(
+  Layer::apply(Layer::then(map_request(g), map_request(f)), svc),
+  s,
+  r
+) = service_call(Layer::apply(map_request((x: R1) => g(f(x))), svc), s, r) {
+  Refl
+}
+
+// ---- filter ----------------------------------------------------------------
+
+// `check` says why a request is refused, or nothing. A refused request never
+// reaches the service and leaves the state as it was.
+fn filter_step<S, Req, Res, E>(
+  svc: Service(S, Req, Res, E),
+  s: S,
+  r: Req,
+  o: Option(E)
+): @outcome Outcome(Res, E) × @state S {
+  match o {
+    None => service_call(svc, s, r)
+    Some(e) => #(@outcome Outcome::Err(<Res: Res, E: E>, e), @state s)
+  }
+}
+
+pub fn filter<S, Req: Shared, Res, E>(
+  check: (Req) -> Option(E)
+): Layer(Service(S, Req, Res, E), Service(S, Req, Res, E)) {
+  Layer::Mk(
+    (svc: Service(S, Req, Res, E)) => Service::Mk(
+      (s: S, r: Req) => filter_step(svc, s, r, check(r))
+    )
+  )
+}
+
+pub theorem filter_refused<S: Type, Req: Type, Res: Type, E: Type>(
+  check: (Req) -> Option(E),
+  svc: Service(S, Req, Res, E),
+  s: S,
+  r: Req,
+  e: E,
+  h: check(r) = Some(e)
+): service_call(
+  Layer::apply(filter(check), svc),
+  s,
+  r
+) = #(@outcome Outcome::Err(<Res: Res, E: E>, e), @state s) {
+  Eq::subst(
+    (o: Option(E)) => filter_step(
+      <S: S, Req: Req, Res: Res, E: E>,
+      svc,
+      s,
+      r,
+      o
+    ) = #(@outcome Outcome::Err(<Res: Res, E: E>, e), @state s),
+    Eq::sym(h),
+    Refl
+  )
+}
+
+// A request the check lets through is the service's own call.
+pub theorem filter_passed<S: Type, Req: Type, Res: Type, E: Type>(
+  check: (Req) -> Option(E),
+  svc: Service(S, Req, Res, E),
+  s: S,
+  r: Req,
+  h: check(r) = None
+): service_call(Layer::apply(filter(check), svc), s, r) = service_call(svc, s, r) {
+  Eq::subst(
+    (o: Option(E)) => filter_step(
+      <S: S, Req: Req, Res: Res, E: E>,
+      svc,
+      s,
+      r,
+      o
+    ) = service_call(svc, s, r),
+    Eq::sym(h),
+    Refl
+  )
+}

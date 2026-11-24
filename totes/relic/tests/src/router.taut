@@ -1,0 +1,72 @@
+import std::builtin::os
+import std::text_ops
+import "../../examples/todo.taut" { todo_answer }
+import "../../examples/users.taut" { users_answer }
+import "../../examples/guestbook.taut" { guestbook_answer }
+
+fn starts(t: Text, p: Text): Bool {
+  Text::slice(t, 0, Text::len(p)) == Some(p)
+}
+
+fn ends(t: Text, p: Text): Bool ! {overflow} {
+  Text::len(t) >= Text::len(p) && Text::slice(
+    t,
+    Text::len(t) - Text::len(p),
+    Text::len(t)
+  ) == Some(p)
+}
+
+perform test("a route with no capture", () => {
+  let r := users_answer("GET /healthz HTTP/1.1\r\n\r\n")
+  expect(starts(r, "HTTP/1.1 200"), r)
+  expect(ends(r, "\r\n\r\nok"), r)
+})
+
+perform test("a capture is read by its type's from_path", () => {
+  let r := users_answer("GET /users/ada HTTP/1.1\r\n\r\n")
+  expect(ends(r, "\r\n\r\nada"), r)
+})
+
+perform test("auth reads authorization only when the handler asks", () => {
+  expect(starts(users_answer("GET /users HTTP/1.1\r\n\r\n"), "HTTP/1.1 200"), "list needs no auth")
+  expect(starts(users_answer("POST /users HTTP/1.1\r\n\r\n"), "HTTP/1.1 401"), "create without auth")
+  let ok := users_answer("POST /users HTTP/1.1\r\nauthorization: Bearer k\r\n\r\n")
+  expect(ends(ok, "created by k"), ok)
+  let gone := users_answer("DELETE /users/bea HTTP/1.1\r\nauthorization: Bearer k\r\n\r\n")
+  expect(ends(gone, "bea removed by k"), gone)
+})
+
+perform test("a method the route does not have is 405 with allow", () => {
+  let r := users_answer("PUT /users HTTP/1.1\r\n\r\n")
+  expect(starts(r, "HTTP/1.1 405"), r)
+  expect(Text::contains(r, "allow: GET, POST, HEAD"), r)
+})
+
+perform test("HEAD falls back to GET without the body", () => {
+  let r := users_answer("HEAD /healthz HTTP/1.1\r\n\r\n")
+  expect(starts(r, "HTTP/1.1 200"), r)
+  expect(ends(r, "\r\n\r\n"), r)
+})
+
+perform test("the catch-all is last", () => {
+  expect(starts(users_answer("GET /nope HTTP/1.1\r\n\r\n"), "HTTP/1.1 404"), "not 404")
+  expect(starts(users_answer("GET / HTTP/1.1\r\n\r\n"), "HTTP/1.1 200"), "root")
+})
+
+perform test("a Nat capture", () => {
+  let r := todo_answer("DELETE /todos/1 HTTP/1.1\r\n\r\n")
+  expect(ends(r, "\r\n\r\n2 walk the dog"), r)
+  expect(starts(todo_answer("DELETE /todos/x HTTP/1.1\r\n\r\n"), "HTTP/1.1 404"), "x is no Nat")
+})
+
+perform test("an optional query item", () => {
+  expect(Text::contains(todo_answer("POST /todos/new?title=tea HTTP/1.1\r\n\r\n"), "3 tea"), "with title")
+  expect(Text::contains(todo_answer("POST /todos/new HTTP/1.1\r\n\r\n"), "3 untitled"), "without title")
+})
+
+perform test("a required query item", () => {
+  let r := guestbook_answer("POST /sign?name=cy&message=hi HTTP/1.1\r\n\r\n")
+  expect(starts(r, "HTTP/1.1 201"), r)
+  expect(Text::contains(r, "cy: hi"), r)
+  expect(starts(guestbook_answer("POST /sign?name=cy HTTP/1.1\r\n\r\n"), "HTTP/1.1 404"), "missing message")
+})

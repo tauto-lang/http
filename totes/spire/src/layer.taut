@@ -1,0 +1,59 @@
+// A layer wraps one service in another. For the middleware here `A` and `B`
+// are service types, `Service(S, Req, Res, E)` to `Service(S2, Req2, Res2, E2)`,
+// but composing layers does not look inside them.
+pub(open) inductive Layer(A: Type, B: Type): Type {
+  Mk(wrap: (A) -> B): Layer(A, B)
+}
+
+pub module Layer {
+  pub fn apply<A, B>(l: Layer(A, B), a: A): B {
+    match l {
+      Mk(w) => w(a)
+    }
+  }
+
+  // `inner` first, then `outer` around it.
+  pub fn then<A, B, C>(inner: Layer(A, B), outer: Layer(B, C)): Layer(A, C) {
+    Layer::Mk((a: A) => Layer::apply(outer, Layer::apply(inner, a)))
+  }
+
+  pub fn identity<A>(): Layer(A, A) {
+    Layer::Mk((a: A) => a)
+  }
+
+  // A layer is the same as rebuilding it from its wrap.
+  theorem eta<A: Type, B: Type>(l: Layer(A, B)): Layer::Mk((a: A) => Layer::apply(l, a)) = l {
+    match l {
+      Mk(w) => Refl
+    }
+  }
+
+  pub theorem then_assoc<A: Type, B: Type, C: Type, D: Type>(
+    f: Layer(A, B),
+    g: Layer(B, C),
+    h: Layer(C, D)
+  ): Layer::then(Layer::then(f, g), h) = Layer::then(f, Layer::then(g, h)) {
+    Refl
+  }
+
+  pub theorem identity_left<A: Type, B: Type>(
+    f: Layer(A, B)
+  ): Layer::then(Layer::identity(), f) = f {
+    Layer::eta(f)
+  }
+
+  pub theorem identity_right<A: Type, B: Type>(
+    f: Layer(A, B)
+  ): Layer::then(f, Layer::identity()) = f {
+    Layer::eta(f)
+  }
+
+  // Applying a composite is applying the parts, inner first.
+  theorem then_apply<A: Type, B: Type, C: Type>(
+    f: Layer(A, B),
+    g: Layer(B, C),
+    a: A
+  ): Layer::apply(Layer::then(f, g), a) = Layer::apply(g, Layer::apply(f, a)) {
+    Refl
+  }
+}

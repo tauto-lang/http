@@ -1,0 +1,1325 @@
+import std::base { List, Nat }
+import std::list { List }
+import std::text { Nat, Text }
+import "status.taut" { Digit, Lead, Status }
+import "bytes.taut" {
+  byte_list_eq,
+  bytes_eq_ci,
+  lines,
+  lines_append,
+  no_byte,
+  no_byte_append,
+  strip_cr,
+  strip_cr_append,
+  strip_prefix,
+  strip_prefix_append,
+  take_until,
+  take_until_append,
+  take_until_none,
+  unlines,
+  unlines_lines,
+  yes_left,
+  yes_right
+}
+import "http.taut" {
+  Header,
+  HttpRequest,
+  HttpResponse,
+  Method,
+  headers_valid,
+  headers_valid_text,
+  headers_valid_text_eq,
+  reason,
+  reason_in,
+  reason_pick,
+  reasons
+}
+
+// HTTP/1.1 on the wire: reading a request and writing a response.
+//
+//   request  = method SP target SP "HTTP/1.1" CRLF *(name ":" SP value CRLF) CRLF body
+//   target   = path [ "?" query ]
+//
+// The body is everything after the empty line: one request per connection, as
+// with `Connection: close`. The reader gives back what the printer wrote
+// (`parse_print_request`) for every request whose parts hold no byte that
+// would end them early (`HttpRequest::ok`).
+
+// ---- printing a request --------------------------------------------------------------
+
+pub module Query {
+  pub fn bytes(q: Option(Text)): List(Nat) {
+    match q {
+      None => Nil
+      Some(t) => Cons(63, Text::bytes(t))
+    }
+  }
+
+  pub fn of(r: List(Nat)): Option(Text) {
+    match r {
+      Nil => None
+      Cons(c, t) => Some(Text::Mk(t))
+    }
+  }
+}
+
+pub fn target_bytes(p: Text, q: Option(Text)): List(Nat) {
+  List::append(Text::bytes(p), Query::bytes(q))
+}
+
+// `HTTP/1.1` and the carriage return that ends the request line.
+pub fn version_tail(): List(Nat) {
+  Text::bytes("HTTP/1.1\r")
+}
+
+pub module Start {
+  // The request line, without its line feed.
+  pub fn line(m: Method, p: Text, q: Option(Text)): List(Nat) {
+    List::append(
+      Method::bytes(m),
+      Cons(32, List::append(target_bytes(p, q), Cons(32, version_tail())))
+    )
+  }
+
+  pub fn done(m: Method, t: List(Nat), y: Bool): Option(Start) {
+    match y {
+      true => start_of(m, take_until(63, t))
+      false => None
+    }
+  }
+
+  pub fn rest(m: Method, p: @before List(Nat) × @after List(Nat)): Option(Start) {
+    match p {
+      #(@before b, @after a) => Start::done(m, b, byte_list_eq(a, Cons(32, version_tail())))
+    }
+  }
+
+  // `r` is empty or starts with the space that ended the method.
+  pub fn target(o: Option(Method), r: List(Nat)): Option(Start) {
+    match o {
+      None => None
+      Some(m) => ⊢ Option(Start) from match r {
+        Nil => None
+        Cons(c, x) => Start::rest(m, take_until(32, x))
+      }
+    }
+  }
+
+  pub fn method(p: @before List(Nat) × @after List(Nat)): Option(Start) {
+    match p {
+      #(@before b, @after a) => Start::target(Method::of(b), a)
+    }
+  }
+
+  pub theorem of_target(
+    m: Method,
+    pb: List(Nat),
+    q: Option(Text),
+    ok: no_byte(63, pb) = true
+  ): start_of(
+    m,
+    take_until(63, List::append(pb, Query::bytes(q)))
+  ) = Some(Start::Mk(m, Text::Mk(pb), q)) {
+    ⊢ start_of(
+      m,
+      take_until(63, List::append(pb, Query::bytes(q)))
+    ) = Some(Start::Mk(m, Text::Mk(pb), q)) from match q {
+      None => Eq::congr(
+        ⟦start_of(m, □)⟧,
+        Eq::trans(Eq::congr(⟦take_until(63, □)⟧, List::append_nil(pb)), take_until_none(63, pb, ok))
+      )
+      Some(qt) => ⊢ start_of(
+        m,
+        take_until(63, List::append(pb, Query::bytes(Some(qt))))
+      ) = Some(Start::Mk(m, Text::Mk(pb), Some(qt))) from match qt {
+        Text::Mk(qb) => Eq::congr(⟦start_of(m, □)⟧, take_until_append(63, pb, qb, ok))
+      }
+    }
+  }
+
+  pub theorem line_no_lf(
+    m: Method,
+    p: Text,
+    q: Option(Text),
+    ok: no_byte(10, target_bytes(p, q)) = true
+  ): no_byte(10, Start::line(m, p, q)) = true {
+    Eq::trans(
+      no_byte_append(
+        10,
+        Method::bytes(m),
+        Cons(32, List::append(target_bytes(p, q), Cons(32, version_tail())))
+      ),
+      Bool::and_intro(
+        no_byte(10, Method::bytes(m)),
+        no_byte(10, Cons(32, List::append(target_bytes(p, q), Cons(32, version_tail())))),
+        Method::no_lf(m),
+        Eq::trans(
+          no_byte_append(10, target_bytes(p, q), Cons(32, version_tail())),
+          Bool::and_intro(
+            no_byte(10, target_bytes(p, q)),
+            no_byte(10, Cons(32, version_tail())),
+            ok,
+            Refl
+          )
+        )
+      )
+    )
+  }
+}
+
+pub module Header {
+  // `name: value` and a carriage return.
+  pub fn line(h: @name Text × @value Text): List(Nat) {
+    List::append(
+      Text::bytes((h: @name Text)),
+      Cons(58, Cons(32, List::append(Text::bytes((h: @value Text)), Cons(13, Nil))))
+    )
+  }
+
+  // The name has no `:` or line feed; the value has no line feed.
+  pub fn ok(h: @name Text × @value Text): Bool {
+    Bool::and(
+      no_byte(58, Text::bytes((h: @name Text))),
+      no_byte(10, Text::bytes((h: @name Text))) && no_byte(10, Text::bytes((h: @value Text)))
+    )
+  }
+
+  pub fn cr(n: List(Nat), o: Option(List(Nat))): Option(@name Text × @value Text) {
+    match o {
+      None => None
+      Some(v) => Some(#(@name Text::Mk(n), @value Text::Mk(v)))
+    }
+  }
+
+  pub fn value_of(n: List(Nat), o: Option(List(Nat))): Option(@name Text × @value Text) {
+    match o {
+      None => None
+      Some(v) => Header::cr(n, strip_cr(v))
+    }
+  }
+
+  pub fn name_of(p: @before List(Nat) × @after List(Nat)): Option(@name Text × @value Text) {
+    match p {
+      #(@before b, @after a) => Header::value_of(b, strip_prefix(Cons(58, Cons(32, Nil)), a))
+    }
+  }
+
+  pub theorem line_no_lf(
+    h: @name Text × @value Text,
+    ok: Header::ok(h) = true
+  ): no_byte(10, Header::line(h)) = true {
+    Eq::trans(
+      no_byte_append(
+        10,
+        Text::bytes((h: @name Text)),
+        Cons(58, Cons(32, List::append(Text::bytes((h: @value Text)), Cons(13, Nil))))
+      ),
+      Bool::and_intro(
+        no_byte(10, Text::bytes((h: @name Text))),
+        no_byte(10, Cons(58, Cons(32, List::append(Text::bytes((h: @value Text)), Cons(13, Nil))))),
+        yes_left(
+          no_byte(10, Text::bytes((h: @name Text))),
+          no_byte(10, Text::bytes((h: @value Text))),
+          yes_right(
+            no_byte(58, Text::bytes((h: @name Text))),
+            no_byte(10, Text::bytes((h: @name Text))) && no_byte(10, Text::bytes((h: @value Text))),
+            ok
+          )
+        ),
+        Eq::trans(
+          no_byte_append(10, Text::bytes((h: @value Text)), Cons(13, Nil)),
+          Bool::and_intro(
+            no_byte(10, Text::bytes((h: @value Text))),
+            no_byte(10, Cons(13, Nil)),
+            yes_right(
+              no_byte(10, Text::bytes((h: @name Text))),
+              no_byte(10, Text::bytes((h: @value Text))),
+              yes_right(
+                no_byte(58, Text::bytes((h: @name Text))),
+                no_byte(
+                  10,
+                  Text::bytes((h: @name Text))
+                ) && no_byte(10, Text::bytes((h: @value Text))),
+                ok
+              )
+            ),
+            Refl
+          )
+        )
+      )
+    )
+  }
+
+  pub theorem line_not_blank(h: @name Text × @value Text): is_blank(Header::line(h)) = false {
+    match h {
+      #(@name n, @value v) => ⊢ is_blank(Header::line(#(@name n, @value v))) = false from match n {
+        Text::Mk(nb) => ⊢ is_blank(
+          Header::line(#(@name Text::Mk(nb), @value v))
+        ) = false from match nb {
+          Nil => Refl
+          Cons(x, t) => ⊢ is_blank(
+            Header::line(#(@name Text::Mk(Cons(x, t)), @value v))
+          ) = false from match t {
+            Nil => Refl
+            Cons(y, u) => Refl
+          }
+        }
+      }
+    }
+  }
+}
+
+pub module Head {
+  // The header lines, the empty line, then `body`.
+  pub fn lines(hs: List(@name Text × @value Text), body: List(Nat)): List(Nat) {
+    match hs {
+      Nil => Cons(13, Cons(10, body))
+      Cons(h, t) => List::append(Header::line(h), Cons(10, Head::lines(t, body)))
+    }
+  }
+}
+
+pub module HttpRequest {
+  pub fn bytes(r: HttpRequest): List(Nat) {
+    match r {
+      Mk(m, p, q, hs, b) => List::append(
+        Start::line(m, p, q),
+        Cons(10, Head::lines(hs, Text::bytes(b)))
+      )
+    }
+  }
+
+  pub fn ok(r: HttpRequest): Bool {
+    match r {
+      Mk(m, p, q, hs, b) => target_ok(p, q) && headers_ok(hs)
+    }
+  }
+}
+
+pub fn print_request(r: HttpRequest): Text {
+  Text::Mk(HttpRequest::bytes(r))
+}
+
+// ---- which requests print cleanly ----------------------------------------------------
+
+// The path has no `?`; the target has no space or line feed.
+pub fn target_ok(p: Text, q: Option(Text)): Bool {
+  Bool::and(
+    no_byte(63, Text::bytes(p)),
+    no_byte(32, target_bytes(p, q)) && no_byte(10, target_bytes(p, q))
+  )
+}
+
+pub fn headers_ok(hs: List(@name Text × @value Text)): Bool {
+  match hs {
+    Nil => true
+    Cons(h, t) => Header::ok(h) && headers_ok(t)
+  }
+}
+
+// The method, path and query of the request line.
+pub(open) inductive Start: Type {
+  Mk(method: Method, path: Text, query: Option(Text)): Start
+}
+
+pub fn start_of(m: Method, p: @before List(Nat) × @after List(Nat)): Option(Start) {
+  match p {
+    #(@before b, @after a) => Some(Start::Mk(m, Text::Mk(b), Query::of(a)))
+  }
+}
+
+pub fn parse_start(l: List(Nat)): Option(Start) {
+  Start::method(take_until(32, l))
+}
+
+pub fn parse_header(l: List(Nat)): Option(@name Text × @value Text) {
+  Header::name_of(take_until(58, l))
+}
+
+pub fn blank_tail(h: Nat, t: List(Nat)): Bool {
+  match t {
+    Nil => Nat::eq(h, 13)
+    Cons(x, u) => false
+  }
+}
+
+// Whether a line is the empty line (just its carriage return).
+pub fn is_blank(l: List(Nat)): Bool {
+  match l {
+    Nil => false
+    Cons(h, t) => blank_tail(h, t)
+  }
+}
+
+pub fn cons_headers(
+  h: @name Text × @value Text,
+  r: Option(List(@name Text × @value Text) × List(Nat))
+): Option(List(@name Text × @value Text) × List(Nat)) {
+  match r {
+    None => None
+    Some(p) => Some(#(Cons(h, (p: List(@name Text × @value Text))), (p: List(Nat))))
+  }
+}
+
+pub fn headers_step(
+  y: Bool,
+  h: Option(@name Text × @value Text),
+  body: List(Nat),
+  rest: Option(List(@name Text × @value Text) × List(Nat))
+): Option(List(@name Text × @value Text) × List(Nat)) {
+  match y {
+    true => Some(#(Nil, body))
+    false => ⊢ Option(List(@name Text × @value Text) × List(Nat)) from match h {
+      None => None
+      Some(x) => cons_headers(x, rest)
+    }
+  }
+}
+
+// The headers up to the empty line, and the body after it.
+pub fn parse_headers(ls: List(List(Nat))): Option(List(@name Text × @value Text) × List(Nat)) {
+  match ls {
+    Nil => None
+    // The same as `headers_step(is_blank(l), parse_header(l), unlines(more), parse_headers(more))`,
+    // written out so that a program computes the body and the later headers only when it needs them.
+    Cons(l, more) => ⊢ Option(List(@name Text × @value Text) × List(Nat)) from match is_blank(l) {
+      true => Some(#(Nil, unlines(more)))
+      false => ⊢ Option(List(@name Text × @value Text) × List(Nat)) from match parse_header(l) {
+        None => None
+        Some(x) => cons_headers(x, parse_headers(more))
+      }
+    }
+  }
+}
+
+pub fn build_request(
+  s: Option(Start),
+  hb: Option(List(@name Text × @value Text) × List(Nat))
+): Option(HttpRequest) {
+  match s {
+    None => None
+    Some(st) => ⊢ Option(HttpRequest) from match st {
+      Start::Mk(m, p, q) => ⊢ Option(HttpRequest) from match hb {
+        None => None
+        Some(x) => Some(
+          HttpRequest::Mk(m, p, q, (x: List(@name Text × @value Text)), Text::Mk((x: List(Nat))))
+        )
+      }
+    }
+  }
+}
+
+pub fn parse_lines(ls: List(List(Nat))): Option(HttpRequest) {
+  match ls {
+    Nil => None
+    Cons(l0, rest) => build_request(parse_start(l0), parse_headers(rest))
+  }
+}
+
+// The request in `t`, or `None` when it is not one.
+pub fn parse_request(t: Text): Option(HttpRequest) {
+  parse_lines(lines(Text::bytes(t)))
+}
+
+// ---- reading what was printed --------------------------------------------------------
+
+pub module Method {
+  pub theorem no_sp(m: Method): no_byte(32, Method::bytes(m)) = true {
+    match m {
+      Get => Refl
+      Post => Refl
+      Put => Refl
+      Delete => Refl
+      Patch => Refl
+      Method::Head => Refl
+      Options => Refl
+    }
+  }
+
+  pub theorem no_lf(m: Method): no_byte(10, Method::bytes(m)) = true {
+    match m {
+      Get => Refl
+      Post => Refl
+      Put => Refl
+      Delete => Refl
+      Patch => Refl
+      Method::Head => Refl
+      Options => Refl
+    }
+  }
+}
+
+pub theorem parse_header_line(
+  h: @name Text × @value Text,
+  ok: Header::ok(h) = true
+): parse_header(Header::line(h)) = Some(h) {
+  match h {
+    #(@name n, @value v) => ⊢ parse_header(
+      Header::line(#(@name n, @value v))
+    ) = Some(#(@name n, @value v)) from match n {
+      Text::Mk(nb) => ⊢ parse_header(
+        Header::line(#(@name Text::Mk(nb), @value v))
+      ) = Some(#(@name Text::Mk(nb), @value v)) from match v {
+        Text::Mk(vb) => Eq::trans(
+          Eq::congr(
+            ⟦Header::name_of(□)⟧,
+            take_until_append(
+              58,
+              nb,
+              Cons(32, List::append(vb, Cons(13, Nil))),
+              yes_left(no_byte(58, nb), no_byte(10, nb) && no_byte(10, vb), ok)
+            )
+          ),
+          Eq::congr(⟦Header::cr(nb, □)⟧, strip_cr_append(vb))
+        )
+      }
+    }
+  }
+}
+
+pub theorem parse_head_lines(
+  hs: List(@name Text × @value Text),
+  body: List(Nat),
+  ok: headers_ok(hs) = true
+): parse_headers(lines(Head::lines(hs, body))) = Some(#(hs, body)) {
+  match hs {
+    Nil => Eq::trans(
+      Eq::congr(⟦parse_headers(□)⟧, lines_append(Cons(13, Nil), body, Refl)),
+      Eq::congr(
+        ⟦the(Option(List(@name Text × @value Text) × List(Nat)), Some(#(Nil, □)))⟧,
+        unlines_lines(body)
+      )
+    )
+    Cons(h, t) => Eq::trans(
+      Eq::congr(
+        ⟦parse_headers(□)⟧,
+        lines_append(
+          Header::line(h),
+          Head::lines(t, body),
+          Header::line_no_lf(h, yes_left(Header::ok(h), headers_ok(t), ok))
+        )
+      ),
+      Eq::trans(
+        Eq::congr(
+          ⟦headers_step(
+            □,
+            parse_header(Header::line(h)),
+            unlines(lines(Head::lines(t, body))),
+            parse_headers(lines(Head::lines(t, body)))
+          )⟧,
+          Header::line_not_blank(h)
+        ),
+        Eq::trans(
+          Eq::congr(
+            ⟦headers_step(
+              false,
+              □,
+              unlines(lines(Head::lines(t, body))),
+              parse_headers(lines(Head::lines(t, body)))
+            )⟧,
+            parse_header_line(h, yes_left(Header::ok(h), headers_ok(t), ok))
+          ),
+          Eq::congr(
+            ⟦headers_step(false, Some(h), unlines(lines(Head::lines(t, body))), □)⟧,
+            parse_head_lines(t, body, yes_right(Header::ok(h), headers_ok(t), ok))
+          )
+        )
+      )
+    )
+  }
+}
+
+pub theorem parse_start_line(
+  m: Method,
+  pb: List(Nat),
+  q: Option(Text),
+  ok: target_ok(Text::Mk(pb), q) = true
+): parse_start(Start::line(m, Text::Mk(pb), q)) = Some(Start::Mk(m, Text::Mk(pb), q)) {
+  Eq::trans(
+    Eq::congr(
+      ⟦Start::method(□)⟧,
+      take_until_append(
+        32,
+        Method::bytes(m),
+        List::append(target_bytes(Text::Mk(pb), q), Cons(32, version_tail())),
+        Method::no_sp(m)
+      )
+    ),
+    Eq::trans(
+      Eq::congr(
+        ⟦Start::target(
+          □,
+          Cons(32, List::append(target_bytes(Text::Mk(pb), q), Cons(32, version_tail())))
+        )⟧,
+        Method::of_bytes(m)
+      ),
+      Eq::trans(
+        Eq::congr(
+          ⟦Start::rest(m, □)⟧,
+          take_until_append(
+            32,
+            target_bytes(Text::Mk(pb), q),
+            version_tail(),
+            yes_left(
+              no_byte(32, target_bytes(Text::Mk(pb), q)),
+              no_byte(10, target_bytes(Text::Mk(pb), q)),
+              yes_right(
+                no_byte(63, pb),
+                no_byte(
+                  32,
+                  target_bytes(Text::Mk(pb), q)
+                ) && no_byte(10, target_bytes(Text::Mk(pb), q)),
+                ok
+              )
+            )
+          )
+        ),
+        Start::of_target(
+          m,
+          pb,
+          q,
+          yes_left(
+            no_byte(63, pb),
+            no_byte(32, target_bytes(Text::Mk(pb), q)) && no_byte(
+              10,
+              target_bytes(Text::Mk(pb), q)
+            ),
+            ok
+          )
+        )
+      )
+    )
+  )
+}
+
+// Reading a printed request gives it back.
+pub theorem parse_print_request(
+  r: HttpRequest,
+  ok: HttpRequest::ok(r) = true
+): parse_request(print_request(r)) = Some(r) {
+  match r {
+    Mk(m, p, q, hs, b) => ⊢ parse_request(
+      print_request(HttpRequest::Mk(m, p, q, hs, b))
+    ) = Some(HttpRequest::Mk(m, p, q, hs, b)) from match p {
+      Text::Mk(pb) => ⊢ parse_request(
+        print_request(HttpRequest::Mk(m, Text::Mk(pb), q, hs, b))
+      ) = Some(HttpRequest::Mk(m, Text::Mk(pb), q, hs, b)) from match b {
+        Text::Mk(bb) => Eq::trans(
+          Eq::congr(
+            ⟦parse_lines(□)⟧,
+            lines_append(
+              Start::line(m, Text::Mk(pb), q),
+              Head::lines(hs, bb),
+              Start::line_no_lf(
+                m,
+                Text::Mk(pb),
+                q,
+                yes_right(
+                  no_byte(32, target_bytes(Text::Mk(pb), q)),
+                  no_byte(10, target_bytes(Text::Mk(pb), q)),
+                  yes_right(
+                    no_byte(63, pb),
+                    no_byte(
+                      32,
+                      target_bytes(Text::Mk(pb), q)
+                    ) && no_byte(10, target_bytes(Text::Mk(pb), q)),
+                    yes_left(target_ok(Text::Mk(pb), q), headers_ok(hs), ok)
+                  )
+                )
+              )
+            )
+          ),
+          Eq::trans(
+            Eq::congr(
+              ⟦build_request(□, parse_headers(lines(Head::lines(hs, bb))))⟧,
+              parse_start_line(m, pb, q, yes_left(target_ok(Text::Mk(pb), q), headers_ok(hs), ok))
+            ),
+            Eq::congr(
+              ⟦build_request(Some(Start::Mk(m, Text::Mk(pb), q)), □)⟧,
+              parse_head_lines(hs, bb, yes_right(target_ok(Text::Mk(pb), q), headers_ok(hs), ok))
+            )
+          )
+        )
+      }
+    }
+  }
+}
+
+// ---- writing a response --------------------------------------------------------------
+//
+//   response = "HTTP/1.1" SP status SP reason CRLF *(name ":" SP value CRLF) CRLF body
+//
+// The status is three digits. After the response's own headers, less any
+// `content-length` among them, comes the `content-length` of its body.
+
+pub fn digit_byte(d: Nat): Nat {
+  Nat::add(d, 48)
+}
+
+// The three digits of a status.
+pub fn status_digits(s: Status): List(Nat) {
+  Status::bytes(s)
+}
+
+pub fn version_head(): List(Nat) {
+  Text::bytes("HTTP/1.1 ")
+}
+
+// The status line, without its line feed.
+pub fn status_line_bytes(s: Status): List(Nat) {
+  List::append(
+    version_head(),
+    List::append(status_digits(s), Cons(32, List::append(Text::bytes(reason(s)), Cons(13, Nil))))
+  )
+}
+
+pub fn content_length(b: Text): @name Text × @value Text {
+  #(@name "content-length", @value Text::of_nat(Text::len(b)))
+}
+
+// Whether a header is called `content-length`, whatever the case of its name.
+pub fn is_content_length(h: @name Text × @value Text): Bool {
+  bytes_eq_ci(Text::bytes((h: @name Text)), Text::bytes("content-length"))
+}
+
+pub fn keep_unless(
+  y: Bool,
+  h: @name Text × @value Text,
+  rest: List(@name Text × @value Text)
+): List(@name Text × @value Text) {
+  match y {
+    true => rest
+    false => Cons(h, rest)
+  }
+}
+
+// The headers without any `content-length`.
+pub fn without_content_length(hs: List(@name Text × @value Text)): List(@name Text × @value Text) {
+  match hs {
+    Nil => Nil
+    Cons(h, t) => keep_unless(is_content_length(h), h, without_content_length(t))
+  }
+}
+
+// Whether a header is called `transfer-encoding`, whatever the case of its name.
+pub fn is_transfer_encoding(h: @name Text × @value Text): Bool {
+  bytes_eq_ci(Text::bytes((h: @name Text)), Text::bytes("transfer-encoding"))
+}
+
+// The headers without any `transfer-encoding`.
+pub fn without_transfer_encoding(
+  hs: List(@name Text × @value Text)
+): List(@name Text × @value Text) {
+  match hs {
+    Nil => Nil
+    Cons(h, t) => keep_unless(is_transfer_encoding(h), h, without_transfer_encoding(t))
+  }
+}
+
+// The headers without the ones that say how the body is framed: neither a
+// `content-length` nor a `transfer-encoding`.
+pub fn without_framing(hs: List(@name Text × @value Text)): List(@name Text × @value Text) {
+  without_content_length(without_transfer_encoding(hs))
+}
+
+// The headers as they go out: the response's own without any `content-length` or
+// `transfer-encoding` of its own (the names are compared without ASCII case), then the
+// one `content-length` of its body. The body goes out by its length, never chunked.
+pub fn sent_headers(hs: List(@name Text × @value Text), b: Text): List(@name Text × @value Text) {
+  List::append(without_framing(hs), Cons(content_length(b), Nil))
+}
+
+pub module HttpResponse {
+  pub fn bytes(r: HttpResponse): List(Nat) {
+    match r {
+      Mk(s, hs, b) => List::append(
+        status_line_bytes(s),
+        Cons(10, Head::lines(sent_headers(hs, b), Text::bytes(b)))
+      )
+    }
+  }
+
+  pub fn ok(r: HttpResponse): Bool {
+    match r {
+      Mk(s, hs, b) => status_ok(s) && headers_ok(hs)
+    }
+  }
+}
+
+// The response itself if every header may be sent, otherwise
+// `invalid_header_response()`. A response built with `response(..)` directly
+// is checked here too, so no header reaches the wire with a line break in it.
+pub fn checked_response(r: HttpResponse): HttpResponse {
+  Header::gate(headers_valid(HttpResponse::headers(r)), r)
+}
+
+pub theorem checked_response_valid(
+  r: HttpResponse,
+  v: headers_valid(HttpResponse::headers(r)) = true
+): checked_response(r) = r {
+  Eq::congr(⟦Header::gate(□, r)⟧, v)
+}
+
+pub fn print_response(r: HttpResponse): Text {
+  Text::Mk(HttpResponse::bytes(checked_response(r)))
+}
+
+// The answer to `HEAD`: the same head, with the `content-length` of the body
+// `GET` would send, and no body.
+pub fn print_head_response(r: HttpResponse): Text {
+  print_head_bytes(checked_response(r))
+}
+
+pub fn print_head_bytes(r: HttpResponse): Text {
+  match r {
+    Mk(s, hs, b) => Text::Mk(
+      List::append(status_line_bytes(s), Cons(10, Head::lines(sent_headers(hs, b), Nil)))
+    )
+  }
+}
+
+// The response as a client reads it: with the `content-length` it was sent with.
+pub fn sent_response(r: HttpResponse): HttpResponse {
+  match r {
+    Mk(s, hs, b) => HttpResponse::Mk(s, sent_headers(hs, b), b)
+  }
+}
+
+// ---- which responses print cleanly ---------------------------------------------------
+
+// Every status prints as three digits.
+pub fn status_ok(s: Status): Bool {
+  true
+}
+
+pub fn digit_gate(y: Bool, d: Nat): Option(Nat) {
+  match y {
+    true => Some(d)
+    false => None
+  }
+}
+
+// The value of an ASCII digit.
+pub fn digit_of(b: Nat): Option(Nat) {
+  match Nat::lt(b, 48) {
+    true => None
+    false => digit_gate(Nat::lt(b, 58), Nat::sub(b, 48))
+  }
+}
+
+pub fn status_space(y: Bool, a: Nat, b: Nat, c: Nat): Option(Status) {
+  match y {
+    true => Status::of_bytes(a, b, c)
+    false => None
+  }
+}
+
+// Three digits and a space; the reason after them is not read.
+pub fn status_of(o: Option(List(Nat))): Option(Status) {
+  match o {
+    None => None
+    Some(l) => ⊢ Option(Status) from match l {
+      Nil => None
+      Cons(a, l1) => ⊢ Option(Status) from match l1 {
+        Nil => None
+        Cons(b, l2) => ⊢ Option(Status) from match l2 {
+          Nil => None
+          Cons(c, l3) => ⊢ Option(Status) from match l3 {
+            Nil => None
+            Cons(sp, rest) => status_space(Nat::eq(sp, 32), a, b, c)
+          }
+        }
+      }
+    }
+  }
+}
+
+pub fn parse_status(l: List(Nat)): Option(Status) {
+  status_of(strip_prefix(version_head(), l))
+}
+
+pub fn build_response(
+  s: Option(Status),
+  hb: Option(List(@name Text × @value Text) × List(Nat))
+): Option(HttpResponse) {
+  match s {
+    None => None
+    Some(st) => ⊢ Option(HttpResponse) from match hb {
+      None => None
+      Some(x) => Some(
+        HttpResponse::Mk(st, (x: List(@name Text × @value Text)), Text::Mk((x: List(Nat))))
+      )
+    }
+  }
+}
+
+pub fn parse_response_lines(ls: List(List(Nat))): Option(HttpResponse) {
+  match ls {
+    Nil => None
+    Cons(l0, rest) => build_response(parse_status(l0), parse_headers(rest))
+  }
+}
+
+// The response in `t`, or `None` when it is not one. The body is everything
+// after the empty line, as with `Connection: close`.
+pub fn parse_response(t: Text): Option(HttpResponse) {
+  parse_response_lines(lines(Text::bytes(t)))
+}
+
+// ---- reading what was printed ---------------------------------------------------------
+
+pub theorem digit_of_digit(d: Nat, lt: Nat::lt(d, 10) = true): digit_of(digit_byte(d)) = Some(d) {
+  Eq::congr(⟦digit_gate(□, d)⟧, lt)
+}
+
+pub theorem parse_status_line(
+  s: Status,
+  ok: status_ok(s) = true
+): parse_status(status_line_bytes(s)) = Some(s) {
+  Eq::trans(
+    Eq::congr(
+      ⟦status_of(□)⟧,
+      strip_prefix_append(
+        version_head(),
+        List::append(
+          status_digits(s),
+          Cons(32, List::append(Text::bytes(reason(s)), Cons(13, Nil)))
+        )
+      )
+    ),
+    ⊢ status_of(
+      Some(List::append(status_digits(s), Cons(32, List::append(Text::bytes(reason(s)), Cons(13, Nil)))))
+    ) = Some(s) from match s {
+      Mk(l, t, o) => Status::read_bytes(Status::Mk(l, t, o))
+    }
+  )
+}
+
+pub fn reasons_ok(l: List(Nat × Text)): Bool {
+  match l {
+    Nil => true
+    Cons(#(_, v), t) => no_byte(10, Text::bytes(v)) && reasons_ok(t)
+  }
+}
+
+pub theorem reason_in_no_lf(
+  s: Nat,
+  l: List(Nat × Text),
+  h: reasons_ok(l) = true
+): no_byte(10, Text::bytes(reason_in(s, l))) = true {
+  match l {
+    Nil => Refl
+    Cons(#(k, v), t) => ⊢ no_byte(
+      10,
+      Text::bytes(reason_pick(Nat::eq(k, s), v, reason_in(s, t)))
+    ) = true from match Nat::eq(k, s) eqn e {
+      false => reason_in_no_lf(s, t, yes_right(no_byte(10, Text::bytes(v)), reasons_ok(t), h))
+      true => yes_left(no_byte(10, Text::bytes(v)), reasons_ok(t), h)
+    }
+  }
+}
+
+pub theorem status_line_no_lf(s: Status): no_byte(10, status_line_bytes(s)) = true {
+  Eq::trans(
+    no_byte_append(
+      10,
+      version_head(),
+      List::append(status_digits(s), Cons(32, List::append(Text::bytes(reason(s)), Cons(13, Nil))))
+    ),
+    Bool::and_intro(
+      no_byte(10, version_head()),
+      no_byte(
+        10,
+        List::append(
+          status_digits(s),
+          Cons(32, List::append(Text::bytes(reason(s)), Cons(13, Nil)))
+        )
+      ),
+      Refl,
+      Eq::trans(
+        no_byte_append(
+          10,
+          status_digits(s),
+          Cons(32, List::append(Text::bytes(reason(s)), Cons(13, Nil)))
+        ),
+        Bool::and_intro(
+          no_byte(10, status_digits(s)),
+          no_byte(10, Cons(32, List::append(Text::bytes(reason(s)), Cons(13, Nil)))),
+          status_digits_no_lf(s),
+          Eq::trans(
+            no_byte_append(10, Text::bytes(reason(s)), Cons(13, Nil)),
+            Bool::and_intro(
+              no_byte(10, Text::bytes(reason(s))),
+              no_byte(10, Cons(13, Nil)),
+              reason_in_no_lf(Status::code(s), reasons(), Refl),
+              Refl
+            )
+          )
+        )
+      )
+    )
+  )
+}
+
+// No digit of a status is a line feed.
+pub theorem status_digits_no_lf(s: Status): no_byte(10, status_digits(s)) = true {
+  match s {
+    Mk(l, t, o) => Eq::trans(
+      Eq::congr(
+        ⟦not(□) && (
+          not(Nat::eq(Digit::byte(t), 10)) && (not(Nat::eq(Digit::byte(o), 10)) && true)
+        )⟧,
+        Lead::byte_not_lf(l)
+      ),
+      Eq::trans(
+        Eq::congr(
+          ⟦not(false) && (not(□) && (not(Nat::eq(Digit::byte(o), 10)) && true))⟧,
+          Digit::byte_not_lf(t)
+        ),
+        Eq::congr(⟦not(false) && (not(false) && (not(□) && true))⟧, Digit::byte_not_lf(o))
+      )
+    )
+  }
+}
+
+// `Nat::digits` after its test, as the proof takes it apart.
+pub fn digits_pick(y: Bool, f: Nat, n: Nat, acc: List(Nat)): List(Nat) {
+  match y {
+    true => Cons(Nat::add(Nat::rem_nz(n, 10, Nat::succ_ne_zero(9)), 48), acc)
+    false => Nat::digits(
+      f,
+      Nat::div_nz(n, 10, Nat::succ_ne_zero(9)),
+      Cons(Nat::add(Nat::rem_nz(n, 10, Nat::succ_ne_zero(9)), 48), acc)
+    )
+  }
+}
+
+pub theorem nat_digits_no_lf(
+  f: Nat,
+  n: Nat,
+  acc: List(Nat),
+  h: no_byte(10, acc) = true
+): no_byte(10, Nat::digits(f, n, acc)) = true {
+  match f {
+    Zero => h
+    Succ(g) => ⊢ no_byte(
+      10,
+      digits_pick(Nat::eq(Nat::div_nz(n, 10, Nat::succ_ne_zero(9)), 0), g, n, acc)
+    ) = true from match Nat::eq(Nat::div_nz(n, 10, Nat::succ_ne_zero(9)), 0) eqn e {
+      false => nat_digits_no_lf(
+        g,
+        Nat::div_nz(n, 10, Nat::succ_ne_zero(9)),
+        Cons(Nat::add(Nat::rem_nz(n, 10, Nat::succ_ne_zero(9)), 48), acc),
+        h
+      )
+      true => h
+    }
+  }
+}
+
+pub theorem content_length_ok(b: Text): Header::ok(content_length(b)) = true {
+  Bool::and_intro(
+    no_byte(58, Text::bytes("content-length")),
+    no_byte(
+      10,
+      Text::bytes("content-length")
+    ) && no_byte(10, Text::bytes(Text::of_nat(Text::len(b)))),
+    Refl,
+    Bool::and_intro(
+      no_byte(10, Text::bytes("content-length")),
+      no_byte(10, Text::bytes(Text::of_nat(Text::len(b)))),
+      Refl,
+      nat_digits_no_lf(Succ(Text::len(b)), Text::len(b), Nil, Refl)
+    )
+  )
+}
+
+pub theorem headers_ok_append(
+  a: List(@name Text × @value Text),
+  b: List(@name Text × @value Text),
+  ha: headers_ok(a) = true,
+  hb: headers_ok(b) = true
+): headers_ok(List::append(a, b)) = true {
+  match a {
+    Nil => hb
+    Cons(h, t) => Bool::and_intro(
+      Header::ok(h),
+      headers_ok(List::append(t, b)),
+      yes_left(Header::ok(h), headers_ok(t), ha),
+      headers_ok_append(t, b, yes_right(Header::ok(h), headers_ok(t), ha), hb)
+    )
+  }
+}
+
+pub theorem keep_unless_ok(
+  y: Bool,
+  h: @name Text × @value Text,
+  rest: List(@name Text × @value Text),
+  hh: Header::ok(h) = true,
+  hr: headers_ok(rest) = true
+): headers_ok(keep_unless(y, h, rest)) = true {
+  match y {
+    true => hr
+    false => Bool::and_intro(Header::ok(h), headers_ok(rest), hh, hr)
+  }
+}
+
+// Dropping the `content-length` headers leaves headers that may be sent.
+pub theorem without_content_length_ok(
+  hs: List(@name Text × @value Text),
+  ok: headers_ok(hs) = true
+): headers_ok(without_content_length(hs)) = true {
+  match hs {
+    Nil => Refl
+    Cons(h, t) => keep_unless_ok(
+      is_content_length(h),
+      h,
+      without_content_length(t),
+      yes_left(Header::ok(h), headers_ok(t), ok),
+      without_content_length_ok(t, yes_right(Header::ok(h), headers_ok(t), ok))
+    )
+  }
+}
+
+// Dropping the `transfer-encoding` headers leaves headers that may be sent.
+pub theorem without_transfer_encoding_ok(
+  hs: List(@name Text × @value Text),
+  ok: headers_ok(hs) = true
+): headers_ok(without_transfer_encoding(hs)) = true {
+  match hs {
+    Nil => Refl
+    Cons(h, t) => keep_unless_ok(
+      is_transfer_encoding(h),
+      h,
+      without_transfer_encoding(t),
+      yes_left(Header::ok(h), headers_ok(t), ok),
+      without_transfer_encoding_ok(t, yes_right(Header::ok(h), headers_ok(t), ok))
+    )
+  }
+}
+
+// Dropping both leaves headers that may be sent.
+pub theorem without_framing_ok(
+  hs: List(@name Text × @value Text),
+  ok: headers_ok(hs) = true
+): headers_ok(without_framing(hs)) = true {
+  without_content_length_ok(without_transfer_encoding(hs), without_transfer_encoding_ok(hs, ok))
+}
+
+// ---- the one `content-length` -----------------------------------------------------------
+
+pub fn count_pick(y: Bool, n: Nat): Nat {
+  match y {
+    true => Succ(n)
+    false => n
+  }
+}
+
+// How many headers are called `content-length`, whatever the case of the name.
+pub fn content_length_count(hs: List(@name Text × @value Text)): Nat {
+  match hs {
+    Nil => Zero
+    Cons(h, t) => count_pick(is_content_length(h), content_length_count(t))
+  }
+}
+
+pub theorem count_pick_add(
+  y: Bool,
+  m: Nat,
+  n: Nat
+): count_pick(y, Nat::add(n, m)) = Nat::add(n, count_pick(y, m)) {
+  match y { true => Refl, false => Refl }
+}
+
+pub theorem content_length_count_append(
+  a: List(@name Text × @value Text),
+  b: List(@name Text × @value Text)
+): content_length_count(
+  List::append(a, b)
+) = Nat::add(content_length_count(b), content_length_count(a)) {
+  match a {
+    Nil => Refl
+    Cons(h, t) => Eq::trans(
+      Eq::congr(⟦count_pick(is_content_length(h), □)⟧, content_length_count_append(t, b)),
+      count_pick_add(is_content_length(h), content_length_count(t), content_length_count(b))
+    )
+  }
+}
+
+pub theorem count_keep_unless(
+  y: Bool,
+  h: @name Text × @value Text,
+  rest: List(@name Text × @value Text),
+  e: is_content_length(h) = y,
+  r: content_length_count(rest) = Zero
+): content_length_count(keep_unless(y, h, rest)) = Zero {
+  match y {
+    true => r
+    false => Eq::trans(
+      Eq::congr(⟦count_pick(□, content_length_count(rest))⟧, e),
+      Eq::congr(⟦count_pick(false, □)⟧, r)
+    )
+  }
+}
+
+// No `content-length` of the user's is left.
+pub theorem without_content_length_count(
+  hs: List(@name Text × @value Text)
+): content_length_count(without_content_length(hs)) = Zero {
+  match hs {
+    Nil => Refl
+    Cons(h, t) => count_keep_unless(
+      is_content_length(h),
+      h,
+      without_content_length(t),
+      Refl,
+      without_content_length_count(t)
+    )
+  }
+}
+
+// Whatever headers a response is given, it goes out with exactly one
+// `content-length` (the name compared without ASCII case): the one for its body.
+// (`sent_transfer_encoding_values` in frame: and no `transfer-encoding`.)
+pub theorem sent_headers_count(
+  hs: List(@name Text × @value Text),
+  b: Text
+): content_length_count(sent_headers(hs, b)) = Succ(Zero) {
+  Eq::trans(
+    content_length_count_append(without_framing(hs), Cons(content_length(b), Nil)),
+    Eq::congr(
+      ⟦Nat::add(content_length_count(Cons(content_length(b), Nil)), □)⟧,
+      without_content_length_count(without_transfer_encoding(hs))
+    )
+  )
+}
+
+// Reading a printed response gives it back, with the `content-length` it was sent with.
+pub theorem parse_print_response(
+  r: HttpResponse,
+  ok: HttpResponse::ok(r) = true,
+  v: headers_valid(HttpResponse::headers(r)) = true
+): parse_response(print_response(r)) = Some(sent_response(r)) {
+  Eq::trans(
+    Eq::congr(⟦parse_response(Text::Mk(HttpResponse::bytes(□)))⟧, checked_response_valid(r, v)),
+    parse_response_bytes(r, ok)
+  )
+}
+
+pub theorem parse_response_bytes(
+  r: HttpResponse,
+  ok: HttpResponse::ok(r) = true
+): parse_response(Text::Mk(HttpResponse::bytes(r))) = Some(sent_response(r)) {
+  match r {
+    Mk(s, hs, b) => match b {
+      Text::Mk(bb) => Eq::trans(
+        Eq::congr(
+          ⟦parse_response_lines(□)⟧,
+          lines_append(
+            status_line_bytes(s),
+            Head::lines(sent_headers(hs, Text::Mk(bb)), bb),
+            status_line_no_lf(s)
+          )
+        ),
+        Eq::trans(
+          Eq::congr(
+            ⟦build_response(
+              □,
+              parse_headers(lines(Head::lines(sent_headers(hs, Text::Mk(bb)), bb)))
+            )⟧,
+            parse_status_line(s, yes_left(status_ok(s), headers_ok(hs), ok))
+          ),
+          Eq::congr(
+            ⟦build_response(Some(s), □)⟧,
+            parse_head_lines(
+              sent_headers(hs, Text::Mk(bb)),
+              bb,
+              headers_ok_append(
+                without_framing(hs),
+                Cons(content_length(Text::Mk(bb)), Nil),
+                without_framing_ok(hs, yes_right(status_ok(s), headers_ok(hs), ok)),
+                Bool::and_intro(
+                  Header::ok(content_length(Text::Mk(bb))),
+                  true,
+                  content_length_ok(Text::Mk(bb)),
+                  Refl
+                )
+              )
+            )
+          )
+        )
+      )
+    }
+  }
+}
+
+// The same response as `print_response`, put together from `Text` pieces:
+// extraction keeps each piece a native text, so no list of bytes is built.
+
+pub fn header_text(h: @name Text × @value Text): Text {
+  Text::concat((h: @name Text), Text::concat(": ", Text::concat((h: @value Text), "\r")))
+}
+
+pub fn head_parts(hs: List(@name Text × @value Text), body: Text): List(Text) {
+  match hs {
+    Nil => Cons("\r\n", Cons(body, Nil))
+    Cons(h, t) => Cons(header_text(h), Cons("\n", head_parts(t, body)))
+  }
+}
+
+pub theorem head_parts_bytes(
+  hs: List(@name Text × @value Text),
+  body: Text
+): Text::bytes(Text::concat_all(head_parts(hs, body))) = Head::lines(hs, Text::bytes(body)) {
+  match hs {
+    Nil => Eq::congr(⟦Cons(13, Cons(10, □))⟧, List::append_nil(Text::bytes(body)))
+    Cons(h, t) => Eq::congr(⟦List::append(Header::line(h), Cons(10, □))⟧, head_parts_bytes(t, body))
+  }
+}
+
+pub fn status_line_text(s: Status): Text {
+  Text::concat(
+    "HTTP/1.1 ",
+    Text::concat(Text::Mk(Status::bytes(s)), Text::concat(" ", Text::concat(reason(s), "\r")))
+  )
+}
+
+pub fn response_text(r: HttpResponse): Text {
+  match r {
+    Mk(s, hs, b) => Text::concat_all(
+      Cons(status_line_text(s), Cons("\n", head_parts(sent_headers(hs, b), b)))
+    )
+  }
+}
+
+pub theorem text_mk_bytes(t: Text): Text::Mk(Text::bytes(t)) = t {
+  match t {
+    Mk(bs) => Refl
+  }
+}
+
+pub theorem response_text_bytes(r: HttpResponse): Text::bytes(
+  response_text(r)
+) = HttpResponse::bytes(r) {
+  match r {
+    Mk(s, hs, b) => Eq::congr(
+      ⟦List::append(status_line_bytes(s), Cons(10, □))⟧,
+      head_parts_bytes(sent_headers(hs, b), b)
+    )
+  }
+}
+
+// What `print_response` sends, built without a list of bytes.
+pub fn print_response_text(r: HttpResponse): Text {
+  response_text(Header::gate(headers_valid_text(HttpResponse::headers(r)), r))
+}
+
+pub theorem print_response_text_eq(r: HttpResponse): print_response_text(r) = print_response(r) {
+  Eq::trans(
+    Eq::congr(⟦response_text(Header::gate(□, r))⟧, headers_valid_text_eq(HttpResponse::headers(r))),
+    Eq::trans(
+      Eq::sym(text_mk_bytes(response_text(checked_response(r)))),
+      Eq::congr(⟦Text::Mk(□)⟧, response_text_bytes(checked_response(r)))
+    )
+  )
+}

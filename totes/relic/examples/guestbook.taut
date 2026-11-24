@@ -1,0 +1,52 @@
+import "../../http/src/status.taut" { Status }
+import "../src/app.taut" { render }
+import "../src/response.taut" { Response, text_response }
+import "../src/router.taut" { router }
+
+struct Entry { name: Text, message: Text }
+
+fn line(e: Entry): Text {
+  concat(e.name, concat(": ", e.message))
+}
+
+fn page(xs: List(Entry)): Text {
+  match xs {
+    Nil => ""
+    Cons(e, Nil) => line(e)
+    Cons(e, rest) => concat(line(e), concat("\n", page(rest)))
+  }
+}
+
+fn sign(xs: List(Entry), name: Text, message: Text): List(Entry) {
+  Cons(Entry { name: name, message: message }, xs)
+}
+
+fn book(): List(Entry) {
+  Cons(
+    Entry { name: "ada", message: "hello" },
+    Cons(Entry { name: "bea", message: "good morning" }, Nil)
+  )
+}
+
+fn read_book(): Response {
+  text_response(Status::ok(), page(book()))
+}
+
+fn sign_book(note: { message: Text, name: Text }): Response {
+  text_response(Status::created(), page(sign(book(), note.name, note.message)))
+}
+
+fn missing(): Response {
+  text_response(Status::not_found(), "not found")
+}
+
+router!(```
+  Route ! {}
+  /sign ?name: Text&message: Text Sign post: sign_book
+  / Book get: read_book
+  /* Missing any: missing
+  ```) => enum Route, fn route, fn handler
+
+pub fn guestbook_answer(raw: Text): Text {
+  render(raw, route, handler)
+}

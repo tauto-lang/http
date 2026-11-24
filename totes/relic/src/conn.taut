@@ -1,0 +1,543 @@
+import std::builtin::os {
+  Host,
+  IoError,
+  Shutdown,
+  TcpAccepted,
+  TcpListener,
+  TcpRead,
+  TcpStream,
+  TcpWritten,
+  io_message,
+  monotonic_clock,
+  sleep,
+  stderr,
+  tcp_accept,
+  tcp_close,
+  tcp_listen,
+  tcp_read,
+  tcp_shutdown,
+  tcp_write
+}
+import "../../http/src/wire.taut" { parse_lines }
+import std::base { List, Nat }
+import std::list { List }
+import std::text { Text }
+import std::text_ops { Bytes }
+import std::builtin::par {
+  Mutex,
+  Semaphore,
+  Task,
+  mutex_claim,
+  mutex_new,
+  mutex_put,
+  mutex_take_claimed,
+  spawn,
+  wait
+}
+import "../../http/src/bytes.taut" { bytes_eq_ci }
+import "../../http/src/status.taut" { Status }
+import "../../http/src/http.taut" { HttpRequest, reason }
+import "response.taut" { Response, finish_response, is_head, text_response }
+import "../../http/src/at.taut" { lines_at }
+import "../../http/src/frame.taut" {
+  Chunks,
+  Fed,
+  Framing,
+  Head,
+  HeadAt,
+  HttpRequest,
+  RequestHead,
+  feed,
+  length_step
+}
+
+// HTTP/1.1 over TCP (`--allow-net`). The bytes of a connection go through the
+// readers of `frame.taut` into a `HttpRequest`, a function answers it, and the
+// response goes back on the same connection, which stays open for the next request
+// until the client asks to close, goes quiet, or has had its fill (`requests_per_connection`).
+// Reading a request is pure (`take_all`), so it runs without a network.
+
+// The most bytes a request's head may take.
+fn head_limit(): Nat {
+  16384
+}
+
+// The most bytes a request's body may take; past it the answer is 413.
+fn body_limit(): Nat {
+  1048576
+}
+
+// The most bytes a chunk's size line may take, with its extensions, and the
+// trailers together.
+fn size_line_limit(): Nat {
+  1024
+}
+
+// Where a request stands as its bytes arrive.
+inductive Reading: Type {
+  ReadingHead(h: RequestHead): Reading
+  // The request without its body, how many body bytes are still to come, and
+  // the pieces of the body so far, the last first.
+  ReadingSized(r: HttpRequest, left: Nat, parts: List(List(Nat))): Reading
+  // The request without its body, the chunked reader, the pieces of the body
+  // so far, the last first, and how many bytes they hold.
+  ReadingChunks(r: HttpRequest, c: Chunks, parts: List(List(Nat)), size: Nat): Reading
+}
+
+pub(open) inductive Took: Type {
+  // More bytes are needed.
+  Wants(r: Reading): Took
+  // The whole request, and the bytes after it.
+  Whole(r: HttpRequest, rest: List(Nat)): Took
+  // The request cannot be read; the answer has this status.
+  RefusedWith(status: Status): Took
+}
+
+pub fn reading_start(): Reading {
+  ReadingHead(Head::start(head_limit()))
+}
+
+fn with_text(r: HttpRequest, o: Option(Text), rest: List(Nat)): Took {
+  match o {
+    None => RefusedWith(Status::bad_request())
+    Some(t) => ⊢ Took from match r {
+      Mk(m, p, q, hs, b) => Whole(HttpRequest::Mk(m, p, q, hs, t), rest)
+    }
+  }
+}
+
+// The whole request with its body; a body that is not UTF-8 is refused.
+fn with_body(r: HttpRequest, body: List(List(Nat)), rest: List(Nat)): Took {
+  with_text(r, Text::of_utf8(List::concat(List::reverse(body))), rest)
+}
+
+fn take_sized(r: HttpRequest, left: Nat, parts: List(List(Nat)), bs: List(Nat)): Took {
+  match feed(length_step, left, bs) {
+    Fed::Mk(n, out, rest) => ⊢ Took from match n {
+      Zero => with_body(r, Cons(out, parts), rest)
+      Succ(k) => Wants(ReadingSized(r, n, Cons(out, parts)))
+    }
+  }
+}
+
+pub module Chunks {
+  // `Some(true)` once the body ended, `Some(false)` when it is malformed.
+  fn over(c: Chunks): Option(Bool) {
+    match c {
+      ChunkSize(n, any, room) => None
+      ChunkExt(n, room) => None
+      ChunkSizeLf(n) => None
+      ChunkData(left) => None
+      ChunkDataLf => None
+      TrailerStart(room) => None
+      TrailerLine(room) => None
+      TrailerLf(room) => None
+      ChunksEndLf => None
+      ChunksDone => Some(true)
+      ChunksBad => Some(false)
+    }
+  }
+
+  pub fn took(r: HttpRequest, c: Chunks, parts: List(List(Nat)), size: Nat, rest: List(Nat)): Took {
+    match Nat::le(size, body_limit()) {
+      false => RefusedWith(Status::content_too_large())
+      true => ⊢ Took from match Chunks::over(c) {
+        None => Wants(ReadingChunks(r, c, parts, size))
+        Some(y) => ⊢ Took from match y {
+          true => with_body(r, parts, rest)
+          false => RefusedWith(Status::bad_request())
+        }
+      }
+    }
+  }
+}
+
+fn take_chunks(r: HttpRequest, c: Chunks, parts: List(List(Nat)), size: Nat, bs: List(Nat)): Took {
+  match Chunks::feed(size_line_limit(), c, bs) {
+    Fed::Mk(c2, out, rest) => Chunks::took(
+      r,
+      c2,
+      Cons(out, parts),
+      Nat::add(size, List::length(out)),
+      rest
+    )
+  }
+}
+
+// After the head: how the body is framed decides how to read it. A request
+// never runs to the end of the connection.
+fn take_body(r: HttpRequest, rest: List(Nat)): Took {
+  match HttpRequest::framing(body_limit(), HttpRequest::headers(r)) {
+    NoBody => Whole(r, rest)
+    Sized(n) => take_sized(r, n, Nil, rest)
+    Chunked => take_chunks(r, Chunks::start(size_line_limit()), Nil, Zero, rest)
+    ToClose => RefusedWith(Status::bad_request())
+    Refused(status) => RefusedWith(status)
+  }
+}
+
+pub module Head {
+  pub fn parsed(o: Option(HttpRequest), rest: List(Nat)): Took {
+    match o {
+      None => RefusedWith(Status::bad_request())
+      Some(r) => take_body(r, rest)
+    }
+  }
+}
+
+fn take_head(h: RequestHead, bs: List(Nat)): Took {
+  took_head(Head::feed_fast(h, bs))
+}
+
+fn head_rest(f: Fed(RequestHead)): List(Nat) {
+  match f {
+    Fed::Mk(s, out, rest) => rest
+  }
+}
+
+// A new request's head read from the received bytes where they are: its lines
+// as positions (`Head::read_at_eq`), and the request read from them
+// (`request_at`), as `took_head(Head::feed_at(h, raw, 0, n))` reads it.
+fn took_head_at(h: RequestHead, raw: Bytes, n: Nat): Took {
+  match h {
+    HeadReading(line, done, limit) => ⊢ Took from match line {
+      Nil => ⊢ Took from match done {
+        Nil => ⊢ Took from match Head::read_at(raw, 0, 0, true, false, Nil, limit, n) {
+          AtRead(spans, next, k) => Head::parsed(
+            lines_at(raw, List::reverse(spans)),
+            head_rest(Head::feed_at(HeadRead(Nil), raw, next, k))
+          )
+          AtReading(s, i, empty, blank, spans, left) => took_head(
+            Head::at_fed(raw, AtReading(s, i, empty, blank, spans, left))
+          )
+          AtTooLong(next, k) => took_head(Head::at_fed(raw, AtTooLong(next, k)))
+        }
+        Cons(d, ds) => took_head(Head::feed_at(h, raw, 0, n))
+      }
+      Cons(b, bs) => took_head(Head::feed_at(h, raw, 0, n))
+    }
+    HeadRead(ls) => took_head(Head::feed_at(h, raw, 0, n))
+    HeadTooLong => took_head(Head::feed_at(h, raw, 0, n))
+  }
+}
+
+// What the head reader's result means for the request.
+fn took_head(f: Fed(RequestHead)): Took {
+  match f {
+    Fed::Mk(s, out, rest) => ⊢ Took from match s {
+      HeadReading(line, done, limit) => Wants(ReadingHead(s))
+      HeadRead(ls) => Head::parsed(parse_lines(ls), rest)
+      HeadTooLong => RefusedWith(Status::request_header_fields_too_large())
+    }
+  }
+}
+
+// The bytes that arrived next, wherever the request stands.
+fn take(rd: Reading, bs: List(Nat)): Took {
+  match rd {
+    ReadingHead(h) => take_head(h, bs)
+    ReadingSized(r, left, parts) => take_sized(r, left, parts, bs)
+    ReadingChunks(r, c, parts, size) => take_chunks(r, c, parts, size, bs)
+  }
+}
+
+// The bytes sent, as they arrived, from the start of a connection.
+pub fn take_all(rd: Reading, pieces: List(List(Nat))): Took {
+  match pieces {
+    Nil => Wants(rd)
+    Cons(bs, more) => ⊢ Took from match take(rd, bs) {
+      Wants(rd2) => take_all(rd2, more)
+      Whole(r, rest) => Whole(r, rest)
+      RefusedWith(status) => RefusedWith(status)
+    }
+  }
+}
+
+// The bytes on the wire to what was read, if anything was. The answer to
+// `HEAD` has no body, and every answer closes the connection.
+pub fn answer_took<!e>(f: (HttpRequest) -> Response ! e, t: Took): Option(Bytes) ! e {
+  match t {
+    Wants(rd) => None
+    Whole(r, rest) => Some(finish_response(is_head(r), true, f(r)))
+    RefusedWith(status) => Some(refusal(status))
+  }
+}
+
+fn refusal(status: Status): Bytes {
+  finish_response(false, true, text_response(status, reason(status)))
+}
+
+// ---- the connection --------------------------------------------------------------------
+
+fn nats(bs: List(u8)): List(Nat) {
+  List::map((b: u8) => Nat::of_u64(U64::of_u8(b)), bs)
+}
+
+// A connection given back with what was read from it: a read takes the
+// stream and gives it back.
+pub(open) struct(affine) Got { conn: TcpStream, took: Took }
+
+// A connection given back with whether the write reached it.
+struct(affine) Wrote { conn: TcpStream, ok: Bool }
+
+// Reads from `c` until the request is whole or cannot be read, starting from
+// `rd` (`reading_start()` for a new connection). A read that times out gives
+// `RefusedWith(408)`; `Wants` once the client stops sending or the read fails
+// for another reason.
+pub fn read_request(c: TcpStream, rd: Reading, deadline: i64): Got ! {tcp_read, div} {
+  match perform tcp_read(c, 16384, Some(deadline)) {
+    TcpRead { stream, got } => match got {
+      Err(e) => Got {
+        conn: stream,
+        took: match e {
+          TimedOut => RefusedWith(Status::request_timeout())
+          Denied(m) => Wants(rd)
+          Failed(m) => Wants(rd)
+        }
+      }
+      Ok(raw) => match rd {
+        // The head is read from the received bytes where they are
+        // (`Head::feed_at_eq`: the same as `take_head` on their list).
+        ReadingHead(h) => match Bytes::len(raw) == 0 {
+          true => Got { conn: stream, took: Wants(rd) }
+          false => match took_head_at(h, raw, Nat::of_u64(Bytes::len(raw))) {
+            Wants(rd2) => read_request(stream, rd2, deadline)
+            Whole(r, rest) => Got { conn: stream, took: Whole(r, rest) }
+            RefusedWith(status) => Got { conn: stream, took: RefusedWith(status) }
+          }
+        }
+        ReadingSized(r, left, parts) => read_rest(stream, rd, deadline, raw)
+        ReadingChunks(r, c, parts, size) => read_rest(stream, rd, deadline, raw)
+      }
+    }
+  }
+}
+
+fn read_rest(c: TcpStream, rd: Reading, deadline: i64, raw: Bytes): Got ! {tcp_read, div} {
+  match Bytes::to_list(raw) {
+    Nil => Got { conn: c, took: Wants(rd) }
+    Cons(b, more) => match take(rd, nats(Cons(b, more))) {
+      Wants(rd2) => read_request(c, rd2, deadline)
+      Whole(r, rest) => Got { conn: c, took: Whole(r, rest) }
+      RefusedWith(status) => Got { conn: c, took: RefusedWith(status) }
+    }
+  }
+}
+
+// How long a client has to send a request, or to take its response. Each
+// request on a connection gets this long again.
+fn wait_ns(): i64 {
+  10000000000
+}
+
+// How long (in milliseconds, as `sleep` takes) to wait before accepting again after
+// an accept fails for a reason other than being denied.
+pub fn accept_retry_ms(): u64 {
+  10
+}
+
+// The most connections served at once by `serve_response`; the next is accepted
+// once one closes. A connection waiting on a read holds a thread of the
+// host's pool for blocking work, so the limit bounds the threads a client
+// can make the server hold by opening connections and sending nothing.
+pub fn connection_limit(): u64 {
+  2048
+}
+
+// The most requests answered on one connection before it closes.
+fn requests_per_connection(): u64 {
+  1000
+}
+
+// Whether a `connection` value lists the `close` option (RFC 9110 7.6.1).
+fn lists_close(parts: List(List(Nat))): Bool {
+  match parts {
+    Nil => false
+    Cons(p, more) => bytes_eq_ci(trim_spaces(p), Text::bytes("close")) || lists_close(more)
+  }
+}
+
+fn drop_spaces(l: List(Nat)): List(Nat) {
+  match l {
+    Nil => Nil
+    Cons(b, more) => match b == 32 || b == 9 {
+      true => drop_spaces(more)
+      false => l
+    }
+  }
+}
+
+fn trim_spaces(l: List(Nat)): List(Nat) {
+  List::reverse(drop_spaces(List::reverse(drop_spaces(l))))
+}
+
+fn split_parts(o: List(List(Nat)) × List(Nat)): List(List(Nat)) {
+  match o {
+    #(parts, last) => Cons(last, parts)
+  }
+}
+
+// Whether any of the `connection` values lists `close`.
+fn any_lists_close(vs: List(Text)): Bool {
+  match vs {
+    Nil => false
+    Cons(v, more) => lists_close(
+      split_parts(Bytes::split(Text::bytes(v), 44))
+    ) || any_lists_close(more)
+  }
+}
+
+// Whether the client asked to close the connection after this request: any of its
+// `connection` headers, not only the first, lists `close`.
+pub fn asks_close(r: HttpRequest): Bool {
+  any_lists_close(HttpRequest::header_all(r, "connection"))
+}
+
+// When a read or a write that starts now gives up. A clock too near the end
+// of `i64` to add the wait to gives up at once.
+fn deadline(): i64 ! {monotonic_clock} {
+  let now := perform monotonic_clock()
+  handle { now + wait_ns() } with { overflow() => now }
+}
+
+fn finish(c: TcpStream): Unit ! {tcp_shutdown, tcp_close} {
+  match perform tcp_shutdown(TcpStream::stopper(&c), ShutdownWrite) {
+    Ok(v) => #()
+    Err(e) => #()
+  }
+  perform tcp_close(c)
+}
+
+// The next request on a connection: what is left of the bytes already
+// received, then what arrives.
+fn next_request(c: TcpStream, rest: List(Nat)): Got ! {tcp_read, monotonic_clock, div} {
+  let deadline := deadline()
+  match rest {
+    Nil => read_request(c, reading_start(), deadline)
+    Cons(b, more) => match take(reading_start(), rest) {
+      Wants(rd) => read_request(c, rd, deadline)
+      Whole(r, rest2) => Got { conn: c, took: Whole(r, rest2) }
+      RefusedWith(status) => Got { conn: c, took: RefusedWith(status) }
+    }
+  }
+}
+
+fn write_bytes(c: TcpStream, b: Bytes): Wrote ! {tcp_write, monotonic_clock, stderr} {
+  match perform tcp_write(c, b, Some(deadline())) {
+    TcpWritten { stream, result } => match result {
+      Ok(u) => Wrote { conn: stream, ok: true }
+      Err(e) => {
+        perform stderr(io_message(e))
+        Wrote { conn: stream, ok: false }
+      }
+    }
+  }
+}
+
+// What serving one connection asks of the host, besides what the handler asks.
+pub effect ConnIo {
+  div,
+  monotonic_clock,
+  stderr,
+  mutex_claim,
+  mutex_new,
+  mutex_take_claimed,
+  tcp_close,
+  tcp_read,
+  tcp_shutdown,
+  tcp_write,
+  wait
+}
+
+// What a task that serves one connection asks of the host: the connection, and
+// the semaphore it gives back.
+pub effect TaskIo {
+  ConnIo,
+  mutex_put
+}
+
+// What `serve_response` asks of the host itself, besides what the tasks and the
+// handler ask: it listens, accepts, waits for a free slot, and starts the tasks.
+pub effect ServeIo {
+  TaskIo,
+  sleep,
+  stderr,
+  tcp_accept,
+  tcp_listen
+}
+
+// One connection, answered by `f`: its requests one after another, up to `left`.
+fn answer_conn<!h: Host>(
+  c: TcpStream,
+  f: (HttpRequest) -> Response ! h,
+  rest: List(Nat),
+  left: u64
+): Unit ! {ConnIo} ∪ h {
+  match next_request(c, rest) {
+    Got { conn, took } => match took {
+      Wants(rd) => finish(conn)
+      RefusedWith(status) => match write_bytes(conn, refusal(status)) {
+        Wrote { conn, ok } => finish(conn)
+      }
+      Whole(r, rest2) => {
+        let last := asks_close(r) || left <= 1
+        // The connection waits in a mutex while `f` runs: `f` may resume more than
+        // once, and a connection may not be held across that.
+        let parked := perform mutex_new(conn)
+        let bytes := finish_response(is_head(r), last, f(r))
+        match write_bytes(Mutex::take(parked), bytes) {
+          Wrote { conn, ok } => match ok && not(last) {
+            true => answer_conn(conn, f, rest2, handle { left - 1 } with { overflow() => 0 })
+            false => finish(conn)
+          }
+        }
+      }
+    }
+  }
+}
+
+fn answer_loop<!h: Host>(
+  l: TcpListener,
+  f: (HttpRequest) -> Response ! h,
+  slots: Semaphore
+): Unit ! {ServeIo, ∀ T. spawn(() -> T ! {TaskIo} ∪ h)} ∪ h {
+  Semaphore::acquire(slots)
+  match perform tcp_accept(l, None) {
+    TcpAccepted { listener, got } => match got {
+      Err(Denied(m2)) => perform stderr(concat(m2, "\n"))
+      Err(e) => {
+        Semaphore::release(slots)
+        perform stderr(concat(io_message(e), "\n"))
+        perform sleep(accept_retry_ms())
+        answer_loop(listener, f, slots)
+      }
+      Ok(c) => {
+        Task::detach(perform spawn(() => {
+          answer_conn(c, f, Nil, requests_per_connection())
+          Semaphore::release(slots)
+        }))
+        answer_loop(listener, f, slots)
+      }
+    }
+  }
+}
+
+// Listen on `address` and answer each request with `f`. Connections are
+// served at once, each in a task, at most `connection_limit()` of them; the
+// next is accepted once one closes. They stay open for further requests
+// (HTTP/1.1 persistent connections) until the client closes or asks to
+// close, or is idle past `wait_ns`. The handler's state is an effect it
+// performs, not a value this loop holds. Stops when listening fails or
+// accepting is not permitted.
+pub fn serve_response<!h: Host>(
+  address: Text,
+  f: (HttpRequest) -> Response ! h
+): Unit ! {ServeIo, ∀ T. spawn(() -> T ! {TaskIo} ∪ h)} ∪ h {
+  match perform tcp_listen(address) {
+    Err(e) => perform stderr(io_message(e))
+    Ok(l) => {
+      perform stderr(concat("listening on ", TcpListener::address(&l)))
+      answer_loop(l, f, Semaphore::new(connection_limit()))
+    }
+  }
+}

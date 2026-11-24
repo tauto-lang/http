@@ -1,0 +1,4551 @@
+import std::base { List, Nat }
+import std::bytes { Bytes }
+import std::uint { UInt }
+import std::list { List }
+import std::nat { Nat }
+import std::nat_div { Nat }
+import std::text { Nat, Text }
+import "bytes.taut" {
+  bytes_eq_ci,
+  lines,
+  lines_append,
+  no_byte,
+  no_byte_head,
+  no_byte_tail,
+  text_eq_ci_at,
+  text_eq_ci_at_eq,
+  yes_left,
+  yes_right
+}
+import "status.taut" { Status }
+import "http.taut" { HttpRequest, HttpResponse, Method, headers_valid, reason }
+import "wire.taut" {
+  Head,
+  Header,
+  HttpRequest,
+  HttpResponse,
+  Start,
+  build_request,
+  build_response,
+  checked_response_valid,
+  content_length,
+  content_length_ok,
+  digit_of,
+  digit_of_digit,
+  headers_ok,
+  headers_ok_append,
+  is_blank,
+  is_content_length,
+  is_transfer_encoding,
+  keep_unless,
+  parse_head_lines,
+  parse_headers,
+  parse_lines,
+  parse_response_lines,
+  parse_start_line,
+  parse_status_line,
+  print_head_bytes,
+  print_response,
+  sent_headers,
+  status_digits,
+  status_line_bytes,
+  status_line_no_lf,
+  status_ok,
+  target_bytes,
+  target_ok,
+  version_tail,
+  without_content_length,
+  without_framing,
+  without_framing_ok,
+  without_transfer_encoding
+}
+
+// Readers that eat a message a few bytes at a time, as they come off a
+// connection: nothing waits for the whole message, and a body passes on as it
+// arrives. A reader is one step on one byte; `feed` runs it over the bytes at
+// hand. `feed_append` says that how the bytes were cut into pieces does not
+// change what the reader decides or passes on.
+
+// ---- feeding bytes to a reader -------------------------------------------------------
+
+// What feeding leaves: the reader's state, the bytes it passed on, and the
+// bytes after the reader stopped (they belong to whatever comes next).
+pub(open) inductive Fed(S: Type): Type {
+  Mk(state: S, out: List(Nat), rest: List(Nat)): Fed(S)
+}
+
+pub fn fed_state<S>(f: Fed(S)): S {
+  match f {
+    Fed::Mk(s, o, r) => s
+  }
+}
+
+pub fn fed_out<S>(f: Fed(S)): List(Nat) {
+  match f {
+    Fed::Mk(s, o, r) => o
+  }
+}
+
+pub fn fed_rest<S>(f: Fed(S)): List(Nat) {
+  match f {
+    Fed::Mk(s, o, r) => r
+  }
+}
+
+// `f` with `o` passed on before what it passed on.
+pub fn fed_prepend<S>(o: List(Nat), f: Fed(S)): Fed(S) {
+  match f {
+    Fed::Mk(s, o2, r) => Fed::Mk(s, List::append(o, o2), r)
+  }
+}
+
+// The size line and the data of one chunk.
+pub fn chunk_size(p: @size List(Nat) × @data List(Nat)): List(Nat) {
+  match p {
+    #(z, d) => z
+  }
+}
+
+pub fn chunk_data(p: @size List(Nat) × @data List(Nat)): List(Nat) {
+  match p {
+    #(z, d) => d
+  }
+}
+
+// The parts of one step: the next state, and the bytes it passes on.
+pub fn step_state<S>(p: @state S × @rest List(Nat)): S {
+  match p {
+    #(s, r) => s
+  }
+}
+
+pub fn step_rest<S>(p: @state S × @rest List(Nat)): List(Nat) {
+  match p {
+    #(s, r) => r
+  }
+}
+
+// One step: `None` when the reader has stopped and the byte is not its own;
+// otherwise the next state and the bytes it passes on.
+pub fn feed_pick<S: Shared>(
+  o: Option(@state S × @rest List(Nat)),
+  s: S,
+  xs: List(Nat),
+  k: (S) -> Fed(S)
+): Fed(S) {
+  match o {
+    None => Fed::Mk(s, Nil, xs)
+    Some(p) => fed_prepend(step_rest(p), k(step_state(p)))
+  }
+}
+
+// Runs `step` over `xs` from `s` until the bytes run out or the reader stops.
+pub fn feed<S: Shared>(
+  step: (S, Nat) -> Option(@state S × @rest List(Nat)),
+  s: S,
+  xs: List(Nat)
+): Fed(S) {
+  match xs {
+    Nil => Fed::Mk(s, Nil, Nil)
+    // `feed_pick(step(s, b), s, Cons(b, t), (s2: S) => feed(step, s2, t))`, written out
+    // so that a program makes no closure for each byte.
+    Cons(b, t) => ⊢ Fed(S) from match step(s, b) {
+      None => Fed::Mk(s, Nil, Cons(b, t))
+      Some(p) => fed_prepend(step_rest(p), feed(step, step_state(p), t))
+    }
+  }
+}
+
+// Feeding `ys` after feeding gave `f`: when the reader stopped inside the
+// first piece, `ys` joins what was left over; otherwise the reader goes on.
+pub fn feed_then<S: Shared>(
+  step: (S, Nat) -> Option(@state S × @rest List(Nat)),
+  f: Fed(S),
+  ys: List(Nat)
+): Fed(S) {
+  match f {
+    Fed::Mk(s, o, r) => ⊢ Fed(S) from match r {
+      Nil => fed_prepend(o, feed(step, s, ys))
+      Cons(b, t) => Fed::Mk(s, o, List::append(Cons(b, t), ys))
+    }
+  }
+}
+
+pub theorem fed_prepend_nil<S: Type>(f: Fed(S)): fed_prepend(Nil, f) = f {
+  match f {
+    Fed::Mk(s, o, r) => Refl
+  }
+}
+
+pub theorem fed_prepend_prepend<S: Type>(
+  a: List(Nat),
+  b: List(Nat),
+  f: Fed(S)
+): fed_prepend(a, fed_prepend(b, f)) = fed_prepend(List::append(a, b), f) {
+  match f {
+    Fed::Mk(s, o, r) => Eq::congr(
+      ⟦the(Fed(S), Fed::Mk(s, □, r))⟧,
+      Eq::sym(List::append_assoc(a, b, o))
+    )
+  }
+}
+
+pub theorem feed_then_prepend<S: Type>(
+  step: (S, Nat) -> Option(@state S × @rest List(Nat)),
+  o: List(Nat),
+  f: Fed(S),
+  ys: List(Nat)
+): feed_then(step, fed_prepend(o, f), ys) = fed_prepend(o, feed_then(step, f, ys)) {
+  match f {
+    Fed::Mk(s, o2, r) => ⊢ feed_then(
+      step,
+      fed_prepend(o, Fed::Mk(s, o2, r)),
+      ys
+    ) = fed_prepend(o, feed_then(step, Fed::Mk(s, o2, r), ys)) from match r {
+      Nil => Eq::sym(fed_prepend_prepend(o, o2, feed(step, s, ys)))
+      Cons(b, t) => Refl
+    }
+  }
+}
+
+pub theorem feed_pick_append<S: Type>(
+  step: (S, Nat) -> Option(@state S × @rest List(Nat)),
+  o: Option(@state S × @rest List(Nat)),
+  s: S,
+  b: Nat,
+  t: List(Nat),
+  ys: List(Nat),
+  ih: (s2: S) -> feed(step, s2, List::append(t, ys)) = feed_then(step, feed(step, s2, t), ys)
+): feed_pick(
+  o,
+  s,
+  Cons(b, List::append(t, ys)),
+  (s2: S) => feed(step, s2, List::append(t, ys))
+) = feed_then(step, feed_pick(o, s, Cons(b, t), (s2: S) => feed(step, s2, t)), ys) {
+  ⊢ feed_pick(
+    o,
+    s,
+    Cons(b, List::append(t, ys)),
+    (s2: S) => feed(step, s2, List::append(t, ys))
+  ) = feed_then(step, feed_pick(o, s, Cons(b, t), (s2: S) => feed(step, s2, t)), ys) from match o {
+    None => Refl
+    Some(p) => Eq::trans(
+      Eq::congr(⟦fed_prepend(step_rest(p), □)⟧, ih(step_state(p))),
+      Eq::sym(feed_then_prepend(step, step_rest(p), feed(step, step_state(p), t), ys))
+    )
+  }
+}
+
+// Feeding two pieces one after the other is feeding them joined.
+pub theorem feed_append<S: Type>(
+  step: (S, Nat) -> Option(@state S × @rest List(Nat)),
+  s: S,
+  xs: List(Nat),
+  ys: List(Nat)
+): feed(step, s, List::append(xs, ys)) = feed_then(step, feed(step, s, xs), ys) {
+  match xs {
+    Nil => Eq::sym(fed_prepend_nil(feed(step, s, ys)))
+    Cons(b, t) => feed_pick_append(
+      step,
+      step(s, b),
+      s,
+      b,
+      t,
+      ys,
+      (s2: S) => feed_append(step, s2, t, ys)
+    )
+  }
+}
+
+// ---- a body of known length ----------------------------------------------------------
+
+// The state is how many bytes of the body are still to come; each passes on.
+pub fn length_step(n: Nat, b: Nat): Option(@state Nat × @rest List(Nat)) {
+  match n {
+    Zero => None
+    Succ(k) => Some(#(@state k, @rest Cons(b, Nil)))
+  }
+}
+
+// A reader that has nothing more to take leaves every byte.
+pub theorem length_done(rest: List(Nat)): feed(length_step, Zero, rest) = Fed::Mk(Zero, Nil, rest) {
+  match rest {
+    Nil => Refl
+    Cons(b, t) => Refl
+  }
+}
+
+// A body of `n` bytes passes on exactly those bytes and leaves the rest.
+pub theorem length_body(
+  bs: List(Nat),
+  rest: List(Nat)
+): feed(length_step, List::length(bs), List::append(bs, rest)) = Fed::Mk(Zero, bs, rest) {
+  ⊢ feed(
+    length_step,
+    List::length(bs),
+    List::append(bs, rest)
+  ) = Fed::Mk(Zero, bs, rest) from match bs {
+    Nil => length_done(rest)
+    Cons(b, t) => Eq::congr(⟦fed_prepend(Cons(b, Nil), □)⟧, length_body(t, rest))
+  }
+}
+
+// ---- the head of a message -----------------------------------------------------------
+
+// Reading the request or status line and the headers, up to the empty line.
+// Lines end with CR LF; the head ends at the first line that is only its CR.
+pub(open) inductive RequestHead: Type {
+  // The bytes of the line so far, the last first; the lines before it, the
+  // last first, each with its CR; how many more bytes the head may take.
+  HeadReading(line: List(Nat), done: List(List(Nat)), limit: Nat): RequestHead
+  // The head's lines as `lines` splits the head: each line with its CR,
+  // then the empty line's CR, then what follows the last line feed.
+  HeadRead(lines: List(List(Nat))): RequestHead
+  // The head did not end within its budget.
+  HeadTooLong: RequestHead
+}
+
+pub module Head {
+  pub fn start(limit: Nat): RequestHead {
+    HeadReading(Nil, Nil, limit)
+  }
+
+  pub fn lines_of(done: List(List(Nat))): List(List(Nat)) {
+    List::append(List::reverse(done), Cons(Cons(13, Nil), Cons(Nil, Nil)))
+  }
+
+  // A line feed: the empty line ends the head, any other line joins the others.
+  pub fn line_end(blank: Bool, line: List(Nat), done: List(List(Nat)), limit: Nat): RequestHead {
+    match blank {
+      true => HeadRead(Head::lines_of(done))
+      false => HeadReading(Nil, Cons(List::reverse(line), done), limit)
+    }
+  }
+
+  // The head passes nothing on; it is read whole, within its budget.
+  pub fn step(h: RequestHead, b: Nat): Option(@state RequestHead × @rest List(Nat)) {
+    match h {
+      HeadReading(line, done, limit) => ⊢ Option(
+        @state RequestHead × @rest List(Nat)
+      ) from match limit {
+        Zero => Some(#(@state HeadTooLong, @rest List::Nil(<A: Nat>)))
+        Succ(k) => Some(
+          #(@state head_byte(Nat::eq(b, 10), b, line, done, k), @rest List::Nil(<A: Nat>))
+        )
+      }
+      HeadRead(ls) => None
+      HeadTooLong => None
+    }
+  }
+
+  // A reader that has read its head leaves every byte.
+  pub theorem read_rest(
+    ls: List(List(Nat)),
+    rest: List(Nat)
+  ): feed(Head::step, HeadRead(ls), rest) = Fed::Mk(HeadRead(ls), Nil, rest) {
+    match rest {
+      Nil => Refl
+      Cons(b, t) => Refl
+    }
+  }
+
+  // The bytes of a line without a line feed join the line, one budget each.
+  pub theorem line_bytes(
+    l: List(Nat),
+    ys: List(Nat),
+    acc: List(Nat),
+    done: List(List(Nat)),
+    c: Nat,
+    ok: no_byte(10, l) = true
+  ): feed(
+    Head::step,
+    HeadReading(acc, done, Nat::add(c, List::length(l))),
+    List::append(l, ys)
+  ) = feed(Head::step, HeadReading(List::reverse_onto(l, acc), done, c), ys) {
+    ⊢ feed(
+      Head::step,
+      HeadReading(acc, done, Nat::add(c, List::length(l))),
+      List::append(l, ys)
+    ) = feed(Head::step, HeadReading(List::reverse_onto(l, acc), done, c), ys) from match l {
+      Nil => Refl
+      Cons(b, t) => Eq::trans(
+        Eq::congr(
+          (y: Bool) => feed_pick(
+            Some(
+              #(
+                @state head_byte(y, b, acc, done, Nat::add(c, List::length(t))),
+                @rest List::Nil(<A: Nat>)
+              )
+            ),
+            HeadReading(acc, done, Nat::add(c, List::length(Cons(b, t)))),
+            Cons(b, List::append(t, ys)),
+            (s2: RequestHead) => feed(Head::step, s2, List::append(t, ys))
+          ),
+          no_byte_head(10, b, t, ok)
+        ),
+        Eq::trans(
+          fed_prepend_nil(
+            feed(
+              Head::step,
+              HeadReading(Cons(b, acc), done, Nat::add(c, List::length(t))),
+              List::append(t, ys)
+            )
+          ),
+          Head::line_bytes(t, ys, Cons(b, acc), done, c, no_byte_tail(10, b, t, ok))
+        )
+      )
+    }
+  }
+
+  // `feed(Head::step, h, xs)` without a step function or a step result per byte.
+  pub fn feed_fast(h: RequestHead, xs: List(Nat)): Fed(RequestHead) {
+    match xs {
+      Nil => Fed::Mk(h, Nil, Nil)
+      Cons(b, t) => ⊢ Fed(RequestHead) from match h {
+        HeadReading(line, done, limit) => ⊢ Fed(RequestHead) from match limit {
+          Zero => Head::feed_fast(HeadTooLong, t)
+          Succ(k) => Head::feed_fast(head_byte(Nat::eq(b, 10), b, line, done, k), t)
+        }
+        HeadRead(ls) => Fed::Mk(h, Nil, Cons(b, t))
+        HeadTooLong => Fed::Mk(h, Nil, Cons(b, t))
+      }
+    }
+  }
+
+  pub theorem feed_eq(
+    h: RequestHead,
+    xs: List(Nat)
+  ): Head::feed_fast(h, xs) = feed(Head::step, h, xs) {
+    match xs {
+      Nil => Refl
+      Cons(b, t) => ⊢ Head::feed_fast(h, Cons(b, t)) = feed(Head::step, h, Cons(b, t)) from match h {
+        HeadReading(line, done, limit) => ⊢ Head::feed_fast(
+          HeadReading(line, done, limit),
+          Cons(b, t)
+        ) = feed(Head::step, HeadReading(line, done, limit), Cons(b, t)) from match limit {
+          Zero => Eq::trans(
+            Head::feed_eq(HeadTooLong, t),
+            Eq::sym(fed_prepend_nil(feed(Head::step, HeadTooLong, t)))
+          )
+          Succ(k) => Eq::trans(
+            Head::feed_eq(head_byte(Nat::eq(b, 10), b, line, done, k), t),
+            Eq::sym(
+              fed_prepend_nil(feed(Head::step, head_byte(Nat::eq(b, 10), b, line, done, k), t))
+            )
+          )
+        }
+        HeadRead(ls) => Refl
+        HeadTooLong => Refl
+      }
+    }
+  }
+
+  // `Head::feed_fast` over the bytes of `b` from `i`, read with `Bytes::get`:
+  // a program reads the received bytes where they are, without a list of them.
+  // `k` bounds the steps; `Bytes::len(b)` is enough.
+  pub fn feed_at(h: RequestHead, b: Bytes, i: Nat, k: Nat): Fed(RequestHead) {
+    match k {
+      Zero => Fed::Mk(h, Nil, Nil)
+      Succ(k2) => ⊢ Fed(RequestHead) from match Bytes::get(b, i) {
+        None => Fed::Mk(h, Nil, Nil)
+        Some(x) => ⊢ Fed(RequestHead) from match h {
+          HeadReading(line, done, limit) => ⊢ Fed(RequestHead) from match limit {
+            Zero => Head::feed_at(HeadTooLong, b, Succ(i), k2)
+            Succ(m) => Head::feed_at(
+              head_byte(Nat::eq(UInt::val8(x), 10), UInt::val8(x), line, done, m),
+              b,
+              Succ(i),
+              k2
+            )
+          }
+          HeadRead(ls) => Fed::Mk(
+            h,
+            Nil,
+            List::map((y: UInt(8)) => UInt::val8(y), List::drop(i, Bytes::to_list(b)))
+          )
+          HeadTooLong => Fed::Mk(
+            h,
+            Nil,
+            List::map((y: UInt(8)) => UInt::val8(y), List::drop(i, Bytes::to_list(b)))
+          )
+        }
+      }
+    }
+  }
+
+  pub theorem feed_at_shift(
+    h: RequestHead,
+    y: UInt(8),
+    t: List(UInt(8)),
+    i: Nat,
+    k: Nat
+  ): Head::feed_at(h, Bytes::Mk(Cons(y, t)), Succ(i), k) = Head::feed_at(h, Bytes::Mk(t), i, k) {
+    match k {
+      Zero => Refl
+      Succ(k2) => ⊢ (⊢ Fed(RequestHead) from match List::nth(t, i) {
+      None => Fed::Mk(h, Nil, Nil)
+      Some(x) => ⊢ Fed(RequestHead) from match h {
+        HeadReading(line, done, limit) => ⊢ Fed(RequestHead) from match limit {
+          Zero => Head::feed_at(HeadTooLong, Bytes::Mk(Cons(y, t)), Succ(Succ(i)), k2)
+          Succ(m) => Head::feed_at(head_byte(Nat::eq(UInt::val8(x), 10), UInt::val8(x), line, done, m), Bytes::Mk(Cons(y, t)), Succ(Succ(i)), k2)
+        }
+        HeadRead(ls) => Fed::Mk(h, Nil, List::map((y: UInt(8)) => UInt::val8(y), List::drop(Succ(i), Bytes::to_list(Bytes::Mk(Cons(y, t))))))
+        HeadTooLong => Fed::Mk(h, Nil, List::map((y: UInt(8)) => UInt::val8(y), List::drop(Succ(i), Bytes::to_list(Bytes::Mk(Cons(y, t))))))
+      }
+    }) = (⊢ Fed(RequestHead) from match List::nth(t, i) {
+      None => Fed::Mk(h, Nil, Nil)
+      Some(x) => ⊢ Fed(RequestHead) from match h {
+        HeadReading(line, done, limit) => ⊢ Fed(RequestHead) from match limit {
+          Zero => Head::feed_at(HeadTooLong, Bytes::Mk(t), Succ(i), k2)
+          Succ(m) => Head::feed_at(head_byte(Nat::eq(UInt::val8(x), 10), UInt::val8(x), line, done, m), Bytes::Mk(t), Succ(i), k2)
+        }
+        HeadRead(ls) => Fed::Mk(h, Nil, List::map((y: UInt(8)) => UInt::val8(y), List::drop(i, Bytes::to_list(Bytes::Mk(t)))))
+        HeadTooLong => Fed::Mk(h, Nil, List::map((y: UInt(8)) => UInt::val8(y), List::drop(i, Bytes::to_list(Bytes::Mk(t)))))
+      }
+    }) from match List::nth(t, i) {
+        None => Refl
+        Some(x) => ⊢ (⊢ Fed(RequestHead) from match h {
+        HeadReading(line, done, limit) => ⊢ Fed(RequestHead) from match limit {
+          Zero => Head::feed_at(HeadTooLong, Bytes::Mk(Cons(y, t)), Succ(Succ(i)), k2)
+          Succ(m) => Head::feed_at(head_byte(Nat::eq(UInt::val8(x), 10), UInt::val8(x), line, done, m), Bytes::Mk(Cons(y, t)), Succ(Succ(i)), k2)
+        }
+        HeadRead(ls) => Fed::Mk(h, Nil, List::map((y: UInt(8)) => UInt::val8(y), List::drop(Succ(i), Bytes::to_list(Bytes::Mk(Cons(y, t))))))
+        HeadTooLong => Fed::Mk(h, Nil, List::map((y: UInt(8)) => UInt::val8(y), List::drop(Succ(i), Bytes::to_list(Bytes::Mk(Cons(y, t))))))
+      }) = (⊢ Fed(RequestHead) from match h {
+        HeadReading(line, done, limit) => ⊢ Fed(RequestHead) from match limit {
+          Zero => Head::feed_at(HeadTooLong, Bytes::Mk(t), Succ(i), k2)
+          Succ(m) => Head::feed_at(head_byte(Nat::eq(UInt::val8(x), 10), UInt::val8(x), line, done, m), Bytes::Mk(t), Succ(i), k2)
+        }
+        HeadRead(ls) => Fed::Mk(h, Nil, List::map((y: UInt(8)) => UInt::val8(y), List::drop(i, Bytes::to_list(Bytes::Mk(t)))))
+        HeadTooLong => Fed::Mk(h, Nil, List::map((y: UInt(8)) => UInt::val8(y), List::drop(i, Bytes::to_list(Bytes::Mk(t)))))
+      }) from match h {
+          HeadReading(line, done, limit) => ⊢ (⊢ Fed(RequestHead) from match limit {
+          Zero => Head::feed_at(HeadTooLong, Bytes::Mk(Cons(y, t)), Succ(Succ(i)), k2)
+          Succ(m) => Head::feed_at(head_byte(Nat::eq(UInt::val8(x), 10), UInt::val8(x), line, done, m), Bytes::Mk(Cons(y, t)), Succ(Succ(i)), k2)
+        }) = (⊢ Fed(RequestHead) from match limit {
+          Zero => Head::feed_at(HeadTooLong, Bytes::Mk(t), Succ(i), k2)
+          Succ(m) => Head::feed_at(head_byte(Nat::eq(UInt::val8(x), 10), UInt::val8(x), line, done, m), Bytes::Mk(t), Succ(i), k2)
+        }) from match limit {
+            Zero => Head::feed_at_shift(HeadTooLong, y, t, Succ(i), k2)
+            Succ(m) => Head::feed_at_shift(
+              head_byte(Nat::eq(UInt::val8(x), 10), UInt::val8(x), line, done, m),
+              y,
+              t,
+              Succ(i),
+              k2
+            )
+          }
+          HeadRead(ls) => Refl
+          HeadTooLong => Refl
+        }
+      }
+    }
+  }
+
+  // Reading the bytes where they are is reading their list.
+  pub theorem feed_at_eq(
+    h: RequestHead,
+    l: List(UInt(8))
+  ): Head::feed_at(
+    h,
+    Bytes::Mk(l),
+    0,
+    List::length(l)
+  ) = Head::feed_fast(h, List::map((y: UInt(8)) => UInt::val8(y), l)) {
+    match l {
+      Nil => Refl
+      Cons(x, t) => ⊢ Head::feed_at(
+        h,
+        Bytes::Mk(Cons(x, t)),
+        0,
+        Succ(List::length(t))
+      ) = Head::feed_fast(h, List::map((y: UInt(8)) => UInt::val8(y), Cons(x, t))) from match h {
+        HeadReading(line, done, limit) => ⊢ Head::feed_at(
+          HeadReading(line, done, limit),
+          Bytes::Mk(Cons(x, t)),
+          0,
+          Succ(List::length(t))
+        ) = Head::feed_fast(
+          HeadReading(line, done, limit),
+          List::map((y: UInt(8)) => UInt::val8(y), Cons(x, t))
+        ) from match limit {
+          Zero => Eq::trans(
+            Head::feed_at_shift(HeadTooLong, x, t, 0, List::length(t)),
+            Head::feed_at_eq(HeadTooLong, t)
+          )
+          Succ(m) => Eq::trans(
+            Head::feed_at_shift(
+              head_byte(Nat::eq(UInt::val8(x), 10), UInt::val8(x), line, done, m),
+              x,
+              t,
+              0,
+              List::length(t)
+            ),
+            Head::feed_at_eq(head_byte(Nat::eq(UInt::val8(x), 10), UInt::val8(x), line, done, m), t)
+          )
+        }
+        HeadRead(ls) => Refl
+        HeadTooLong => Refl
+      }
+    }
+  }
+
+  pub fn read_at(
+    b: Bytes,
+    s: Nat,
+    i: Nat,
+    empty: Bool,
+    blank: Bool,
+    done: List(Span),
+    limit: Nat,
+    k: Nat
+  ): HeadAt {
+    match k {
+      Zero => AtReading(s, i, empty, blank, done, limit)
+      Succ(k2) => ⊢ HeadAt from match Bytes::get(b, i) {
+        None => AtReading(s, i, empty, blank, done, limit)
+        Some(x) => ⊢ HeadAt from match limit {
+          Zero => AtTooLong(Succ(i), k2)
+          Succ(m) => ⊢ HeadAt from match Nat::eq(UInt::val8(x), 10) {
+            true => ⊢ HeadAt from match blank {
+              true => AtRead(done, Succ(i), k2)
+              false => Head::read_at(
+                b,
+                Succ(i),
+                Succ(i),
+                true,
+                false,
+                Cons(MkSpan(s, i), done),
+                m,
+                k2
+              )
+            }
+            false => Head::read_at(b, s, Succ(i), false, blank_next(empty, x), done, m, k2)
+          }
+        }
+      }
+    }
+  }
+
+  // The step of `read_at` at a line feed or another byte, as its own function.
+  pub fn read_at_lf(
+    lf: Bool,
+    b: Bytes,
+    x: UInt(8),
+    s: Nat,
+    i: Nat,
+    empty: Bool,
+    blank: Bool,
+    done: List(Span),
+    m: Nat,
+    k: Nat
+  ): HeadAt {
+    match lf {
+      true => ⊢ HeadAt from match blank {
+        true => AtRead(done, Succ(i), k)
+        false => Head::read_at(b, Succ(i), Succ(i), true, false, Cons(MkSpan(s, i), done), m, k)
+      }
+      false => Head::read_at(b, s, Succ(i), false, blank_next(empty, x), done, m, k)
+    }
+  }
+
+  // The step of `read_at` at the byte `o`, as its own function.
+  pub fn read_at_byte(
+    o: Option(UInt(8)),
+    b: Bytes,
+    s: Nat,
+    i: Nat,
+    empty: Bool,
+    blank: Bool,
+    done: List(Span),
+    limit: Nat,
+    k: Nat
+  ): HeadAt {
+    match o {
+      None => AtReading(s, i, empty, blank, done, limit)
+      Some(x) => ⊢ HeadAt from match limit {
+        Zero => AtTooLong(Succ(i), k)
+        Succ(m) => Head::read_at_lf(
+          Nat::eq(UInt::val8(x), 10),
+          b,
+          x,
+          s,
+          i,
+          empty,
+          blank,
+          done,
+          m,
+          k
+        )
+      }
+    }
+  }
+
+  // The step of `feed_at` at the byte `o`, as its own function.
+  pub fn feed_at_byte(
+    o: Option(UInt(8)),
+    h: RequestHead,
+    b: Bytes,
+    i: Nat,
+    k: Nat
+  ): Fed(RequestHead) {
+    match o {
+      None => Fed::Mk(h, Nil, Nil)
+      Some(x) => ⊢ Fed(RequestHead) from match h {
+        HeadReading(line, done, limit) => ⊢ Fed(RequestHead) from match limit {
+          Zero => Head::feed_at(HeadTooLong, b, Succ(i), k)
+          Succ(m) => Head::feed_at(
+            head_byte(Nat::eq(UInt::val8(x), 10), UInt::val8(x), line, done, m),
+            b,
+            Succ(i),
+            k
+          )
+        }
+        HeadRead(ls) => Fed::Mk(
+          h,
+          Nil,
+          List::map((y: UInt(8)) => UInt::val8(y), List::drop(i, Bytes::to_list(b)))
+        )
+        HeadTooLong => Fed::Mk(
+          h,
+          Nil,
+          List::map((y: UInt(8)) => UInt::val8(y), List::drop(i, Bytes::to_list(b)))
+        )
+      }
+    }
+  }
+
+  // What the positions say, as `feed_at` says it.
+  pub fn at_fed(b: Bytes, a: HeadAt): Fed(RequestHead) {
+    match a {
+      AtReading(s, i, empty, blank, done, limit) => Fed::Mk(
+        HeadReading(List::reverse(span_vals(b, MkSpan(s, i))), spans_vals(b, done), limit),
+        Nil,
+        Nil
+      )
+      AtRead(done, next, k) => Head::feed_at(
+        HeadRead(Head::lines_of(spans_vals(b, done))),
+        b,
+        next,
+        k
+      )
+      AtTooLong(next, k) => Head::feed_at(HeadTooLong, b, next, k)
+    }
+  }
+
+  pub theorem snoc_line(
+    l: List(UInt(8)),
+    s: Nat,
+    i: Nat,
+    x: UInt(8),
+    ho: List::nth(l, i) = Some(x),
+    hsi: s <= i = true,
+    line: List(Nat),
+    he: line = List::reverse(span_vals(Bytes::Mk(l), MkSpan(s, i)))
+  ): List::reverse(span_vals(Bytes::Mk(l), MkSpan(s, Succ(i)))) = Cons(UInt::val8(x), line) {
+    Eq::trans(
+      Eq::congr(
+        ⟦List::reverse(List::map((y: UInt(8)) => UInt::val8(y), □))⟧,
+        between_snoc(l, s, i, x, ho, hsi)
+      ),
+      Eq::trans(
+        Eq::congr(
+          ⟦List::reverse(□)⟧,
+          List::map_append((y: UInt(8)) => UInt::val8(y), between(l, s, i), Cons(x, Nil))
+        ),
+        Eq::trans(
+          List::reverse_append(
+            List::map((y: UInt(8)) => UInt::val8(y), between(l, s, i)),
+            Cons(UInt::val8(x), Nil)
+          ),
+          Eq::congr(⟦Cons(UInt::val8(x), □)⟧, Eq::sym(he))
+        )
+      )
+    )
+  }
+
+  pub theorem empty_line(
+    l: List(UInt(8)),
+    a: Nat
+  ): List::reverse(span_vals(Bytes::Mk(l), MkSpan(a, a))) = Nil {
+    Eq::congr(⟦List::reverse(List::map((y: UInt(8)) => UInt::val8(y), □))⟧, between_same(l, a))
+  }
+
+  pub theorem line_back(
+    l: List(UInt(8)),
+    s: Nat,
+    i: Nat,
+    line: List(Nat),
+    he: line = List::reverse(span_vals(Bytes::Mk(l), MkSpan(s, i)))
+  ): List::reverse(line) = span_vals(Bytes::Mk(l), MkSpan(s, i)) {
+    Eq::trans(
+      Eq::congr(⟦List::reverse(□)⟧, he),
+      List::reverse_reverse(span_vals(Bytes::Mk(l), MkSpan(s, i)))
+    )
+  }
+
+  pub theorem read_at_step(
+    l: List(UInt(8)),
+    o: Option(UInt(8)),
+    s: Nat,
+    i: Nat,
+    ho: List::nth(l, i) = o,
+    hsi: s <= i = true,
+    empty: Bool,
+    blank: Bool,
+    done: List(Span),
+    limit: Nat,
+    k: Nat,
+    line: List(Nat),
+    he: line = List::reverse(span_vals(Bytes::Mk(l), MkSpan(s, i))),
+    hn: is_nil_bytes(line) = empty,
+    hb: is_blank(line) = blank
+  ): Head::at_fed(
+    Bytes::Mk(l),
+    Head::read_at_byte(o, Bytes::Mk(l), s, i, empty, blank, done, limit, k)
+  ) = Head::feed_at_byte(
+    o,
+    HeadReading(line, spans_vals(Bytes::Mk(l), done), limit),
+    Bytes::Mk(l),
+    i,
+    k
+  ) decreasing_by k {
+    ⊢ Head::at_fed(
+      Bytes::Mk(l),
+      Head::read_at_byte(o, Bytes::Mk(l), s, i, empty, blank, done, limit, k)
+    ) = Head::feed_at_byte(
+      o,
+      HeadReading(line, spans_vals(Bytes::Mk(l), done), limit),
+      Bytes::Mk(l),
+      i,
+      k
+    ) from match o {
+      None => Eq::congr(
+        ⟦the(
+          Fed(RequestHead),
+          Fed::Mk(HeadReading(□, spans_vals(Bytes::Mk(l), done), limit), Nil, Nil)
+        )⟧,
+        Eq::sym(he)
+      )
+      Some(x) => ⊢ Head::at_fed(
+        Bytes::Mk(l),
+        Head::read_at_byte(Some(x), Bytes::Mk(l), s, i, empty, blank, done, limit, k)
+      ) = Head::feed_at_byte(
+        Some(x),
+        HeadReading(line, spans_vals(Bytes::Mk(l), done), limit),
+        Bytes::Mk(l),
+        i,
+        k
+      ) from match limit {
+        Zero => Refl
+        Succ(m) => ⊢ Eq(
+          Fed(RequestHead),
+          Head::at_fed(
+            Bytes::Mk(l),
+            Head::read_at_lf(
+              Nat::eq(UInt::val8(x), 10),
+              Bytes::Mk(l),
+              x,
+              s,
+              i,
+              empty,
+              blank,
+              done,
+              m,
+              k
+            )
+          ),
+          Head::feed_at(
+            head_byte(
+              Nat::eq(UInt::val8(x), 10),
+              UInt::val8(x),
+              line,
+              spans_vals(Bytes::Mk(l), done),
+              m
+            ),
+            Bytes::Mk(l),
+            Succ(i),
+            k
+          )
+        ) from match Nat::eq(UInt::val8(x), 10) eqn e2 {
+          // Another byte: it joins the line.
+          false => ⊢ Head::at_fed(
+            Bytes::Mk(l),
+            Head::read_at(Bytes::Mk(l), s, Succ(i), false, blank_next(empty, x), done, m, k)
+          ) = Head::feed_at(
+            HeadReading(Cons(UInt::val8(x), line), spans_vals(Bytes::Mk(l), done), m),
+            Bytes::Mk(l),
+            Succ(i),
+            k
+          ) from match k {
+            Zero => Eq::congr(
+              ⟦the(
+                Fed(RequestHead),
+                Fed::Mk(HeadReading(□, spans_vals(Bytes::Mk(l), done), m), Nil, Nil)
+              )⟧,
+              Head::snoc_line(l, s, i, x, ho, hsi, line, he)
+            )
+            Succ(k3) => Head::read_at_step(
+              l,
+              List::nth(l, Succ(i)),
+              s,
+              Succ(i),
+              Refl,
+              Nat::le_trans(s, i, Succ(i), hsi, Nat::le_succ(i)),
+              false,
+              blank_next(empty, x),
+              done,
+              m,
+              k3,
+              Cons(UInt::val8(x), line),
+              Eq::sym(Head::snoc_line(l, s, i, x, ho, hsi, line, he)),
+              Refl,
+              blank_next_eq(x, line, empty, hn)
+            )
+          }
+          // A line feed.
+          true => ⊢ Head::at_fed(
+            Bytes::Mk(l),
+            Head::read_at_lf(true, Bytes::Mk(l), x, s, i, empty, blank, done, m, k)
+          ) = Head::feed_at(
+            Head::line_end(is_blank(line), line, spans_vals(Bytes::Mk(l), done), m),
+            Bytes::Mk(l),
+            Succ(i),
+            k
+          ) from match blank {
+            true => Eq::sym(
+              Eq::congr(
+                ⟦Head::feed_at(
+                  Head::line_end(□, line, spans_vals(Bytes::Mk(l), done), m),
+                  Bytes::Mk(l),
+                  Succ(i),
+                  k
+                )⟧,
+                hb
+              )
+            )
+            false => Eq::trans(
+              ⊢ Head::at_fed(
+                Bytes::Mk(l),
+                Head::read_at(Bytes::Mk(l), Succ(i), Succ(i), true, false, Cons(MkSpan(s, i), done), m, k)
+              ) = Head::feed_at(
+                HeadReading(Nil, Cons(span_vals(Bytes::Mk(l), MkSpan(s, i)), spans_vals(Bytes::Mk(l), done)), m),
+                Bytes::Mk(l),
+                Succ(i),
+                k
+              ) from match k {
+                Zero => Eq::congr(
+                  ⟦the(Fed(RequestHead), Fed::Mk(
+                    HeadReading(□, Cons(span_vals(Bytes::Mk(l), MkSpan(s, i)), spans_vals(Bytes::Mk(l), done)), m),
+                    Nil,
+                    Nil
+                  ))⟧,
+                  Head::empty_line(l, Succ(i))
+                )
+                Succ(k3) => Head::read_at_step(
+                  l,
+                  List::nth(l, Succ(i)),
+                  Succ(i),
+                  Succ(i),
+                  Refl,
+                  le_self(Succ(i)),
+                  true,
+                  false,
+                  Cons(MkSpan(s, i), done),
+                  m,
+                  k3,
+                  Nil,
+                  Eq::sym(Head::empty_line(l, Succ(i))),
+                  Refl,
+                  Refl
+                )
+              },
+              Eq::trans(
+                Eq::congr(
+                  ⟦Head::feed_at(HeadReading(Nil, Cons(□, spans_vals(Bytes::Mk(l), done)), m), Bytes::Mk(l), Succ(i), k)⟧,
+                  Eq::sym(Head::line_back(l, s, i, line, he))
+                ),
+                Eq::sym(
+                  Eq::congr(
+                    ⟦Head::feed_at(Head::line_end(□, line, spans_vals(Bytes::Mk(l), done), m), Bytes::Mk(l), Succ(i), k)⟧,
+                    hb
+                  )
+                )
+              )
+            )
+          }
+        }
+      }
+    }
+  }
+
+  // Reading the head as positions is reading it with `feed_at`.
+  pub theorem read_at_eq(
+    b: Bytes,
+    limit: Nat,
+    k: Nat
+  ): Head::at_fed(
+    b,
+    Head::read_at(b, 0, 0, true, false, Nil, limit, k)
+  ) = Head::feed_at(HeadReading(Nil, Nil, limit), b, 0, k) {
+    match b {
+      Bytes::Mk(l) => ⊢ Head::at_fed(
+        Bytes::Mk(l),
+        Head::read_at(Bytes::Mk(l), 0, 0, true, false, Nil, limit, k)
+      ) = Head::feed_at(HeadReading(Nil, Nil, limit), Bytes::Mk(l), 0, k) from match k {
+        Zero => Eq::congr(
+          ⟦the(Fed(RequestHead), Fed::Mk(HeadReading(□, Nil, limit), Nil, Nil))⟧,
+          Head::empty_line(l, 0)
+        )
+        Succ(k2) => Head::read_at_step(
+          l,
+          List::nth(l, 0),
+          0,
+          0,
+          Refl,
+          Refl,
+          true,
+          false,
+          Nil,
+          limit,
+          k2,
+          Nil,
+          Eq::sym(Head::empty_line(l, 0)),
+          Refl,
+          Refl
+        )
+      }
+    }
+  }
+
+  // A whole line that is not the empty line: it joins the lines read.
+  pub theorem full_line(
+    l: List(Nat),
+    ys: List(Nat),
+    done: List(List(Nat)),
+    c: Nat,
+    ok: no_byte(10, l) = true,
+    nb: is_blank(List::reverse_onto(l, Nil)) = false
+  ): feed(
+    Head::step,
+    HeadReading(Nil, done, Nat::add(Succ(c), List::length(l))),
+    List::append(l, Cons(10, ys))
+  ) = feed(Head::step, HeadReading(Nil, Cons(l, done), c), ys) {
+    Eq::trans(
+      Head::line_bytes(l, Cons(10, ys), Nil, done, Succ(c), ok),
+      Eq::trans(
+        Eq::congr(
+          (y: Bool) => feed_pick(
+            Some(
+              #(
+                @state Head::line_end(y, List::reverse_onto(l, Nil), done, c),
+                @rest List::Nil(<A: Nat>)
+              )
+            ),
+            HeadReading(List::reverse_onto(l, Nil), done, Succ(c)),
+            Cons(10, ys),
+            (s2: RequestHead) => feed(Head::step, s2, ys)
+          ),
+          nb
+        ),
+        Eq::trans(
+          fed_prepend_nil(
+            feed(Head::step, HeadReading(Nil, Cons(List::reverse(List::reverse(l)), done), c), ys)
+          ),
+          Eq::congr(
+            ⟦feed(Head::step, HeadReading(Nil, Cons(□, done), c), ys)⟧,
+            List::reverse_reverse(l)
+          )
+        )
+      )
+    )
+  }
+
+  // The empty line ends the head; what follows is left.
+  pub theorem blank_line(
+    ys: List(Nat),
+    done: List(List(Nat)),
+    c: Nat
+  ): feed(
+    Head::step,
+    HeadReading(Nil, done, Succ(Succ(c))),
+    Cons(13, Cons(10, ys))
+  ) = Fed::Mk(HeadRead(Head::lines_of(done)), Nil, ys) {
+    Eq::trans(
+      fed_prepend_nil(fed_prepend(Nil, feed(Head::step, HeadRead(Head::lines_of(done)), ys))),
+      Eq::trans(
+        fed_prepend_nil(feed(Head::step, HeadRead(Head::lines_of(done)), ys)),
+        Head::read_rest(Head::lines_of(done), ys)
+      )
+    )
+  }
+
+  // ---- reading a printed request's head ------------------------------------------------
+
+  pub theorem headers(
+    hs: List(@name Text × @value Text),
+    z: List(Nat),
+    done: List(List(Nat)),
+    c: Nat,
+    ok: headers_ok(hs) = true
+  ): feed(
+    Head::step,
+    HeadReading(Nil, done, headers_budget(c, hs)),
+    Head::lines(hs, z)
+  ) = Fed::Mk(
+    HeadRead(Head::lines_of(List::reverse_onto(List::map(Header::line, hs), done))),
+    Nil,
+    z
+  ) {
+    ⊢ feed(
+      Head::step,
+      HeadReading(Nil, done, headers_budget(c, hs)),
+      Head::lines(hs, z)
+    ) = Fed::Mk(
+      HeadRead(Head::lines_of(List::reverse_onto(List::map(Header::line, hs), done))),
+      Nil,
+      z
+    ) from match hs {
+      Nil => Head::blank_line(z, done, c)
+      Cons(h, t) => Eq::trans(
+        Head::full_line(
+          Header::line(h),
+          Head::lines(t, z),
+          done,
+          headers_budget(c, t),
+          Header::line_no_lf(h, yes_left(Header::ok(h), headers_ok(t), ok)),
+          Header::line_not_blank_rev(h)
+        ),
+        Head::headers(
+          t,
+          z,
+          Cons(Header::line(h), done),
+          c,
+          yes_right(Header::ok(h), headers_ok(t), ok)
+        )
+      )
+    }
+  }
+
+  pub theorem lines_append(
+    hs: List(@name Text × @value Text),
+    body: List(Nat),
+    rest: List(Nat)
+  ): List::append(Head::lines(hs, body), rest) = Head::lines(hs, List::append(body, rest)) {
+    ⊢ List::append(
+      Head::lines(hs, body),
+      rest
+    ) = Head::lines(hs, List::append(body, rest)) from match hs {
+      Nil => Refl
+      Cons(h, t) => Eq::trans(
+        List::append_assoc(Header::line(h), Cons(10, Head::lines(t, body)), rest),
+        Eq::congr(⟦List::append(Header::line(h), Cons(10, □))⟧, Head::lines_append(t, body, rest))
+      )
+    }
+  }
+
+  // The head reader reads a printed request's head, whatever comes after it,
+  // when its budget covers the head; the body and what follows are left.
+  pub theorem print_request(
+    r: HttpRequest,
+    rest: List(Nat),
+    c: Nat,
+    ok: HttpRequest::ok(r) = true
+  ): feed(
+    Head::step,
+    Head::start(HttpRequest::head_budget(c, r)),
+    List::append(HttpRequest::bytes(r), rest)
+  ) = Fed::Mk(
+    HeadRead(HttpRequest::head_lines(r)),
+    Nil,
+    List::append(Text::bytes(HttpRequest::body(r)), rest)
+  ) {
+    ⊢ feed(
+      Head::step,
+      Head::start(HttpRequest::head_budget(c, r)),
+      List::append(HttpRequest::bytes(r), rest)
+    ) = Fed::Mk(
+      HeadRead(HttpRequest::head_lines(r)),
+      Nil,
+      List::append(Text::bytes(HttpRequest::body(r)), rest)
+    ) from match r {
+      Mk(m, p, q, hs, b) => Eq::trans(
+        Eq::congr(
+          ⟦feed(
+            Head::step,
+            Head::start(HttpRequest::head_budget(c, HttpRequest::Mk(m, p, q, hs, b))),
+            □
+          )⟧,
+          Eq::trans(
+            List::append_assoc(
+              Start::line(m, p, q),
+              Cons(10, Head::lines(hs, Text::bytes(b))),
+              rest
+            ),
+            Eq::congr(
+              ⟦List::append(Start::line(m, p, q), Cons(10, □))⟧,
+              Head::lines_append(hs, Text::bytes(b), rest)
+            )
+          )
+        ),
+        Eq::trans(
+          Head::full_line(
+            Start::line(m, p, q),
+            Head::lines(hs, List::append(Text::bytes(b), rest)),
+            Nil,
+            headers_budget(c, hs),
+            Start::line_no_lf(
+              m,
+              p,
+              q,
+              yes_right(
+                no_byte(32, target_bytes(p, q)),
+                no_byte(10, target_bytes(p, q)),
+                yes_right(
+                  no_byte(63, Text::bytes(p)),
+                  no_byte(32, target_bytes(p, q)) && no_byte(10, target_bytes(p, q)),
+                  yes_left(target_ok(p, q), headers_ok(hs), ok)
+                )
+              )
+            ),
+            Start::line_not_blank_rev(m, p, q)
+          ),
+          Eq::trans(
+            Head::headers(
+              hs,
+              List::append(Text::bytes(b), rest),
+              Cons(Start::line(m, p, q), Nil),
+              c,
+              yes_right(target_ok(p, q), headers_ok(hs), ok)
+            ),
+            Eq::congr(
+              ⟦the(
+                Fed(RequestHead),
+                Fed::Mk(HeadRead(□), Nil, List::append(Text::bytes(b), rest))
+              )⟧,
+              Eq::trans(
+                Eq::congr(
+                  ⟦List::append(□, Cons(Cons(13, Nil), Cons(Nil, Nil)))⟧,
+                  reverse_onto_back(List::map(Header::line, hs), Cons(Start::line(m, p, q), Nil))
+                ),
+                Eq::congr(
+                  ⟦Cons(Start::line(m, p, q), □)⟧,
+                  Eq::sym(lines_head(hs, yes_right(target_ok(p, q), headers_ok(hs), ok)))
+                )
+              )
+            )
+          )
+        )
+      )
+    }
+  }
+
+  // The head reader reads a response's head as it goes out, whatever comes
+  // after it, when its budget covers the head; the body and what follows are left.
+  pub theorem response_bytes(
+    r: HttpResponse,
+    rest: List(Nat),
+    c: Nat,
+    ok: HttpResponse::ok(r) = true
+  ): feed(
+    Head::step,
+    Head::start(HttpResponse::head_budget(c, r)),
+    List::append(HttpResponse::bytes(r), rest)
+  ) = Fed::Mk(
+    HeadRead(HttpResponse::head_lines(r)),
+    Nil,
+    List::append(Text::bytes(HttpResponse::body(r)), rest)
+  ) {
+    ⊢ feed(
+      Head::step,
+      Head::start(HttpResponse::head_budget(c, r)),
+      List::append(HttpResponse::bytes(r), rest)
+    ) = Fed::Mk(
+      HeadRead(HttpResponse::head_lines(r)),
+      Nil,
+      List::append(Text::bytes(HttpResponse::body(r)), rest)
+    ) from match r {
+      Mk(s, hs, b) => Eq::trans(
+        Eq::congr(
+          ⟦feed(
+            Head::step,
+            Head::start(HttpResponse::head_budget(c, HttpResponse::Mk(s, hs, b))),
+            □
+          )⟧,
+          Eq::trans(
+            List::append_assoc(
+              status_line_bytes(s),
+              Cons(10, Head::lines(sent_headers(hs, b), Text::bytes(b))),
+              rest
+            ),
+            Eq::congr(
+              ⟦List::append(status_line_bytes(s), Cons(10, □))⟧,
+              Head::lines_append(sent_headers(hs, b), Text::bytes(b), rest)
+            )
+          )
+        ),
+        Eq::trans(
+          Head::full_line(
+            status_line_bytes(s),
+            Head::lines(sent_headers(hs, b), List::append(Text::bytes(b), rest)),
+            Nil,
+            headers_budget(c, sent_headers(hs, b)),
+            status_line_no_lf(s),
+            status_line_not_blank_rev(s)
+          ),
+          Eq::trans(
+            Head::headers(
+              sent_headers(hs, b),
+              List::append(Text::bytes(b), rest),
+              Cons(status_line_bytes(s), Nil),
+              c,
+              sent_headers_ok(hs, b, yes_right(status_ok(s), headers_ok(hs), ok))
+            ),
+            Eq::congr(
+              ⟦the(
+                Fed(RequestHead),
+                Fed::Mk(HeadRead(□), Nil, List::append(Text::bytes(b), rest))
+              )⟧,
+              Eq::trans(
+                Eq::congr(
+                  ⟦List::append(□, Cons(Cons(13, Nil), Cons(Nil, Nil)))⟧,
+                  reverse_onto_back(
+                    List::map(Header::line, sent_headers(hs, b)),
+                    Cons(status_line_bytes(s), Nil)
+                  )
+                ),
+                Eq::congr(
+                  ⟦Cons(status_line_bytes(s), □)⟧,
+                  Eq::sym(
+                    lines_head(
+                      sent_headers(hs, b),
+                      sent_headers_ok(hs, b, yes_right(status_ok(s), headers_ok(hs), ok))
+                    )
+                  )
+                )
+              )
+            )
+          )
+        )
+      )
+    }
+  }
+
+  // The head reader reads a printed response's head, whatever comes after it.
+  pub theorem print_response(
+    r: HttpResponse,
+    rest: List(Nat),
+    c: Nat,
+    ok: HttpResponse::ok(r) = true,
+    v: headers_valid(HttpResponse::headers(r)) = true
+  ): feed(
+    Head::step,
+    Head::start(HttpResponse::head_budget(c, r)),
+    List::append(Text::bytes(http::src::wire::print_response(r)), rest)
+  ) = Fed::Mk(
+    HeadRead(HttpResponse::head_lines(r)),
+    Nil,
+    List::append(Text::bytes(HttpResponse::body(r)), rest)
+  ) {
+    Eq::trans(
+      Eq::congr(
+        ⟦feed(
+          Head::step,
+          Head::start(HttpResponse::head_budget(c, r)),
+          List::append(HttpResponse::bytes(□), rest)
+        )⟧,
+        checked_response_valid(r, v)
+      ),
+      Head::response_bytes(r, rest, c, ok)
+    )
+  }
+}
+
+pub fn head_byte(
+  lf: Bool,
+  b: Nat,
+  line: List(Nat),
+  done: List(List(Nat)),
+  limit: Nat
+): RequestHead {
+  match lf {
+    true => Head::line_end(is_blank(line), line, done, limit)
+    false => HeadReading(Cons(b, line), done, limit)
+  }
+}
+
+// ---- the head as positions ----------------------------------------------------------
+
+// The items of `l` from `s` up to, not including, `e`.
+pub fn between<A>(l: List(A), s: Nat, e: Nat): List(A) {
+  match l {
+    Nil => Nil
+    Cons(h, t) => ⊢ List(A) from match e {
+      Zero => Nil
+      Succ(e2) => ⊢ List(A) from match s {
+        Zero => Cons(h, between(t, Zero, e2))
+        Succ(s2) => between(t, s2, e2)
+      }
+    }
+  }
+}
+
+pub theorem between_same<A: Type>(l: List(A), a: Nat): between(l, a, a) = Nil {
+  match l {
+    Nil => Refl
+    Cons(h, t) => ⊢ between(Cons(h, t), a, a) = Nil from match a {
+      Zero => Refl
+      Succ(a2) => between_same(t, a2)
+    }
+  }
+}
+
+pub fn opt_or<A>(d: A, o: Option(A)): A {
+  match o {
+    None => d
+    Some(x) => x
+  }
+}
+
+pub fn opt_some<A>(o: Option(A)): Bool {
+  match o {
+    None => false
+    Some(x) => true
+  }
+}
+
+pub theorem le_self(a: Nat): a <= a = true {
+  match a {
+    Zero => Refl
+    Succ(a2) => le_self(a2)
+  }
+}
+
+// Reading one more item, `x`, at `i` puts it at the end.
+pub theorem between_snoc<A: Type>(
+  l: List(A),
+  s: Nat,
+  i: Nat,
+  x: A,
+  ho: List::nth(l, i) = Some(x),
+  hsi: s <= i = true
+): between(l, s, Succ(i)) = List::append(between(l, s, i), Cons(x, Nil)) {
+  match l {
+    Nil => False::elim(false_ne_true(Eq::congr(⟦opt_some(□)⟧, ho)))
+    Cons(h, t) => ⊢ between(
+      Cons(h, t),
+      s,
+      Succ(i)
+    ) = List::append(between(Cons(h, t), s, i), Cons(x, Nil)) from match i {
+      Zero => ⊢ between(
+        Cons(h, t),
+        s,
+        Succ(Zero)
+      ) = List::append(between(Cons(h, t), s, Zero), Cons(x, Nil)) from match s {
+        Zero => Eq::trans(
+          Eq::congr(⟦Cons(h, □)⟧, between_same(t, Zero)),
+          Eq::congr(⟦Cons(□, Nil)⟧, Eq::congr(⟦opt_or(h, □)⟧, ho))
+        )
+        Succ(s2) => False::elim(false_ne_true(hsi))
+      }
+      Succ(i2) => ⊢ between(
+        Cons(h, t),
+        s,
+        Succ(Succ(i2))
+      ) = List::append(between(Cons(h, t), s, Succ(i2)), Cons(x, Nil)) from match s {
+        Zero => Eq::congr(⟦Cons(h, □)⟧, between_snoc(t, Zero, i2, x, ho, Nat::le_zero(i2)))
+        Succ(s2) => between_snoc(t, s2, i2, x, ho, hsi)
+      }
+    }
+  }
+}
+
+pub(open) inductive Span: Type {
+  // A line of the head: the bytes from `start` up to `end`.
+  MkSpan(start: Nat, end: Nat): Span
+}
+
+pub fn span_vals(b: Bytes, sp: Span): List(Nat) {
+  match sp {
+    MkSpan(s, e) => List::map((y: UInt(8)) => UInt::val8(y), between(Bytes::to_list(b), s, e))
+  }
+}
+
+pub fn spans_vals(b: Bytes, sps: List(Span)): List(List(Nat)) {
+  match sps {
+    Nil => Nil
+    Cons(p, t) => Cons(span_vals(b, p), spans_vals(b, t))
+  }
+}
+
+pub fn is_nil_bytes(l: List(Nat)): Bool {
+  match l {
+    Nil => true
+    Cons(h, t) => false
+  }
+}
+
+// Whether the line is the empty line once `x` joins it.
+pub fn blank_next(empty: Bool, x: UInt(8)): Bool {
+  match empty {
+    true => Nat::eq(UInt::val8(x), 13)
+    false => false
+  }
+}
+
+pub theorem blank_next_eq(
+  x: UInt(8),
+  line: List(Nat),
+  empty: Bool,
+  hn: is_nil_bytes(line) = empty
+): is_blank(Cons(UInt::val8(x), line)) = blank_next(empty, x) {
+  match line {
+    Nil => Eq::congr(⟦blank_next(□, x)⟧, hn)
+    Cons(h, t) => Eq::congr(⟦blank_next(□, x)⟧, hn)
+  }
+}
+
+// Reading the head as positions: the line read so far is the bytes from `s`
+// up to `i`; `empty` and `blank` say whether it is empty and whether it is
+// the empty line (only its carriage return).
+pub(open) inductive HeadAt: Type {
+  // The bytes ran out.
+  AtReading(s: Nat, i: Nat, empty: Bool, blank: Bool, done: List(Span), limit: Nat): HeadAt
+  // The head ended; the lines read, the last first, and where the rest begins.
+  AtRead(done: List(Span), next: Nat, k: Nat): HeadAt
+  AtTooLong(next: Nat, k: Nat): HeadAt
+}
+
+// A line of two or more bytes, turned around onto anything, is not the empty line.
+pub theorem blank_onto(
+  l: List(Nat),
+  x: Nat,
+  y: Nat,
+  z: List(Nat)
+): is_blank(List::reverse_onto(l, Cons(x, Cons(y, z)))) = false {
+  match l {
+    Nil => Refl
+    Cons(h, t) => blank_onto(t, h, x, Cons(y, z))
+  }
+}
+
+pub theorem blank_two(
+  b: List(Nat),
+  y: Nat,
+  w: List(Nat),
+  x: Nat,
+  acc: List(Nat)
+): is_blank(List::reverse_onto(List::append(b, Cons(y, w)), Cons(x, acc))) = false {
+  match b {
+    Nil => blank_onto(w, y, x, acc)
+    Cons(h, t) => blank_two(t, y, w, h, Cons(x, acc))
+  }
+}
+
+// A line with two bytes `x` and `y` in it is not the empty line, turned around.
+pub theorem blank_split(
+  a: List(Nat),
+  x: Nat,
+  b: List(Nat),
+  y: Nat,
+  w: List(Nat),
+  acc: List(Nat)
+): is_blank(List::reverse_onto(List::append(a, Cons(x, List::append(b, Cons(y, w)))), acc)) = false {
+  ⊢ is_blank(
+    List::reverse_onto(List::append(a, Cons(x, List::append(b, Cons(y, w)))), acc)
+  ) = false from match a {
+    Nil => blank_two(b, y, w, x, acc)
+    Cons(h, t) => blank_split(t, x, b, y, w, Cons(h, acc))
+  }
+}
+
+// The budget the head reader spends on the header lines `hs` and the empty
+// line, with `c` left over.
+pub fn headers_budget(c: Nat, hs: List(@name Text × @value Text)): Nat {
+  match hs {
+    Nil => Succ(Succ(c))
+    Cons(h, t) => Nat::add(Succ(headers_budget(c, t)), List::length(Header::line(h)))
+  }
+}
+
+pub module Header {
+  pub theorem line_not_blank_rev(h: @name Text × @value Text): is_blank(
+    List::reverse_onto(Header::line(h), Nil)
+  ) = false {
+    blank_split(
+      Text::bytes((h: @name Text)),
+      58,
+      Nil,
+      32,
+      List::append(Text::bytes((h: @value Text)), Cons(13, Nil)),
+      Nil
+    )
+  }
+
+  pub fn named(name: List(Nat), h: @name Text × @value Text): Bool {
+    // `bytes_eq_ci(Text::bytes((h: @name Text)), name)` (`text_eq_ci_at_eq`), reading the
+    // name in place.
+    text_eq_ci_at((h: @name Text), 0, name)
+  }
+
+  // The values of the headers called `name`, in order.
+  pub fn values(name: List(Nat), hs: List(@name Text × @value Text)): List(List(Nat)) {
+    match hs {
+      Nil => Nil
+      Cons(h, t) => ⊢ List(List(Nat)) from match Header::named(name, h) {
+        true => Cons(Text::bytes((h: @value Text)), Header::values(name, t))
+        false => Header::values(name, t)
+      }
+    }
+  }
+
+  pub theorem values_append(
+    name: List(Nat),
+    a: List(@name Text × @value Text),
+    b: List(@name Text × @value Text)
+  ): Header::values(
+    name,
+    List::append(a, b)
+  ) = List::append(Header::values(name, a), Header::values(name, b)) {
+    ⊢ Header::values(
+      name,
+      List::append(a, b)
+    ) = List::append(Header::values(name, a), Header::values(name, b)) from match a {
+      Nil => Refl
+      Cons(h, t) => named_before_append(
+        Header::named(name, h),
+        Text::bytes((h: @value Text)),
+        Header::values(name, List::append(t, b)),
+        Header::values(name, t),
+        Header::values(name, b),
+        Header::values_append(name, t, b)
+      )
+    }
+  }
+}
+
+// The lines of the headers and the empty line, as `lines` splits them.
+pub theorem lines_head(
+  hs: List(@name Text × @value Text),
+  ok: headers_ok(hs) = true
+): lines(
+  Head::lines(hs, Nil)
+) = List::append(List::map(Header::line, hs), Cons(Cons(13, Nil), Cons(Nil, Nil))) {
+  ⊢ lines(
+    Head::lines(hs, Nil)
+  ) = List::append(List::map(Header::line, hs), Cons(Cons(13, Nil), Cons(Nil, Nil))) from match hs {
+    Nil => Refl
+    Cons(h, t) => Eq::trans(
+      lines_append(
+        Header::line(h),
+        Head::lines(t, Nil),
+        Header::line_no_lf(h, yes_left(Header::ok(h), headers_ok(t), ok))
+      ),
+      Eq::congr(
+        ⟦Cons(Header::line(h), □)⟧,
+        lines_head(t, yes_right(Header::ok(h), headers_ok(t), ok))
+      )
+    )
+  }
+}
+
+pub theorem reverse_onto_back<A: Type>(
+  l: List(A),
+  acc: List(A)
+): List::reverse(List::reverse_onto(l, acc)) = List::append(List::reverse(acc), l) {
+  Eq::trans(
+    Eq::congr(⟦List::reverse(□)⟧, List::reverse_onto_append(l, acc)),
+    Eq::trans(
+      List::reverse_append(List::reverse(l), acc),
+      Eq::congr(⟦List::append(List::reverse(acc), □)⟧, List::reverse_reverse(l))
+    )
+  )
+}
+
+pub module HttpRequest {
+  // The head's lines of a request: its request line, then the lines `lines` gives
+  // for its headers and the empty line.
+  pub fn head_lines(r: HttpRequest): List(List(Nat)) {
+    match r {
+      Mk(m, p, q, hs, b) => Cons(Start::line(m, p, q), lines(Head::lines(hs, Nil)))
+    }
+  }
+
+  // What the head reader spends on a request's head, with `c` left over.
+  pub fn head_budget(c: Nat, r: HttpRequest): Nat {
+    match r {
+      Mk(m, p, q, hs, b) => Nat::add(
+        Succ(headers_budget(c, hs)),
+        List::length(Start::line(m, p, q))
+      )
+    }
+  }
+
+  // The budget `HttpRequest::head_budget(c, r)` is the length of the request's head
+  // with `c` to spare: any budget at least the head's length reads it.
+  pub theorem head_budget_length(
+    c: Nat,
+    r: HttpRequest
+  ): HttpRequest::head_budget(
+    c,
+    r
+  ) = Nat::add(c, List::length(HttpRequest::bytes(without_body(r)))) {
+    ⊢ HttpRequest::head_budget(
+      c,
+      r
+    ) = Nat::add(c, List::length(HttpRequest::bytes(without_body(r)))) from match r {
+      Mk(m, p, q, hs, b) => Eq::trans(
+        Eq::congr(
+          ⟦Nat::add(Succ(□), List::length(Start::line(m, p, q)))⟧,
+          headers_budget_length(c, hs)
+        ),
+        Eq::trans(
+          Nat::add_assoc(
+            c,
+            Succ(List::length(Head::lines(hs, Nil))),
+            List::length(Start::line(m, p, q))
+          ),
+          Eq::congr(
+            ⟦Nat::add(c, □)⟧,
+            Eq::trans(
+              Nat::add_comm(
+                Succ(List::length(Head::lines(hs, Nil))),
+                List::length(Start::line(m, p, q))
+              ),
+              Eq::sym(List::length_append(Start::line(m, p, q), Cons(10, Head::lines(hs, Nil))))
+            )
+          )
+        )
+      )
+    }
+  }
+
+  // ---- how the body is delimited -------------------------------------------------------
+  //
+  // RFC 9112, section 6. A reader that guesses where an ambiguous body ends can
+  // disagree with the next reader on the path, and the bytes one of them takes
+  // as the next request are the other's body (request smuggling). So every
+  // ambiguity is refused: Content-Length values that are not all the same
+  // number, Transfer-Encoding together with Content-Length, and transfer
+  // codings this reader does not know.
+
+  pub fn framing_of(max_body: Nat, c: Coding, l: Length): Framing {
+    match c {
+      NoCoding => ⊢ Framing from match l {
+        NoLength => NoBody
+        LengthIs(n) => sized_within(Nat::le(n, max_body), n)
+        LengthBad => Refused(Status::bad_request())
+      }
+      JustChunked => ⊢ Framing from match l {
+        NoLength => Chunked
+        LengthIs(n) => Refused(Status::bad_request())
+        LengthBad => Refused(Status::bad_request())
+      }
+      OtherChunked => Refused(Status::not_implemented())
+      NotChunked => Refused(Status::bad_request())
+    }
+  }
+
+  // A request's body, refused with 413 when it is longer than `max_body`.
+  pub fn framing(max_body: Nat, hs: List(@name Text × @value Text)): Framing {
+    HttpRequest::framing_of(max_body, coding_of(hs), content_length_of(hs))
+  }
+
+  pub theorem framing_sized(
+    max_body: Nat,
+    c: Coding,
+    l: Length,
+    n: Nat,
+    e: HttpRequest::framing_of(max_body, c, l) = Sized(n)
+  ): l = LengthIs(n) {
+    match c {
+      NoCoding => ⊢ l = LengthIs(n) from match l {
+        NoLength => False::elim(false_ne_true(Eq::congr(is_sized, e)))
+        LengthIs(k) => Eq::congr(LengthIs, sized_within_is(Nat::le(k, max_body), k, n, e))
+        LengthBad => False::elim(false_ne_true(Eq::congr(is_sized, e)))
+      }
+      JustChunked => ⊢ l = LengthIs(n) from match l {
+        NoLength => False::elim(false_ne_true(Eq::congr(is_sized, e)))
+        LengthIs(k) => False::elim(false_ne_true(Eq::congr(is_sized, e)))
+        LengthBad => False::elim(false_ne_true(Eq::congr(is_sized, e)))
+      }
+      OtherChunked => False::elim(false_ne_true(Eq::congr(is_sized, e)))
+      NotChunked => False::elim(false_ne_true(Eq::congr(is_sized, e)))
+    }
+  }
+
+  // A request is read with a body of `n` bytes only when it has Content-Length
+  // headers and every one of them is the number `n`.
+  pub theorem sized_lengths(
+    max_body: Nat,
+    hs: List(@name Text × @value Text),
+    n: Nat,
+    e: HttpRequest::framing(max_body, hs) = Sized(n)
+  ): all_say(n, Header::values(content_length_name(), hs)) = true {
+    yes_right(
+      agrees(NoLength, n),
+      all_say(n, Header::values(content_length_name(), hs)),
+      lengths_agree(
+        Header::values(content_length_name(), hs),
+        NoLength,
+        n,
+        HttpRequest::framing_sized(max_body, coding_of(hs), content_length_of(hs), n, e)
+      )
+    )
+  }
+
+  pub theorem framing_sized_coding(
+    max_body: Nat,
+    c: Coding,
+    l: Length,
+    n: Nat,
+    e: HttpRequest::framing_of(max_body, c, l) = Sized(n)
+  ): c = NoCoding {
+    match c {
+      NoCoding => Refl
+      JustChunked => ⊢ JustChunked = NoCoding from match l {
+        NoLength => False::elim(false_ne_true(Eq::congr(is_sized, e)))
+        LengthIs(k) => False::elim(false_ne_true(Eq::congr(is_sized, e)))
+        LengthBad => False::elim(false_ne_true(Eq::congr(is_sized, e)))
+      }
+      OtherChunked => False::elim(false_ne_true(Eq::congr(is_sized, e)))
+      NotChunked => False::elim(false_ne_true(Eq::congr(is_sized, e)))
+    }
+  }
+
+  // A request read with a body of `n` bytes has no Transfer-Encoding header.
+  pub theorem sized_no_coding(
+    max_body: Nat,
+    hs: List(@name Text × @value Text),
+    n: Nat,
+    e: HttpRequest::framing(max_body, hs) = Sized(n)
+  ): Header::values(transfer_encoding_name(), hs) = Nil {
+    coding_none(
+      Header::values(transfer_encoding_name(), hs),
+      HttpRequest::framing_sized_coding(max_body, coding_of(hs), content_length_of(hs), n, e)
+    )
+  }
+
+  // ---- examples ------------------------------------------------------------------------
+}
+
+pub module Start {
+  pub theorem line_not_blank_rev(
+    m: Method,
+    p: Text,
+    q: Option(Text)
+  ): is_blank(List::reverse_onto(Start::line(m, p, q), Nil)) = false {
+    blank_split(Method::bytes(m), 32, target_bytes(p, q), 32, version_tail(), Nil)
+  }
+}
+
+// A request without its body, as its head alone reads.
+pub fn without_body(r: HttpRequest): HttpRequest {
+  match r {
+    Mk(m, p, q, hs, b) => HttpRequest::Mk(m, p, q, hs, Text::Mk(Nil))
+  }
+}
+
+// The head's lines read back as the request without its body.
+pub theorem parse_request_head(
+  r: HttpRequest,
+  ok: HttpRequest::ok(r) = true
+): parse_lines(HttpRequest::head_lines(r)) = Some(without_body(r)) {
+  match r {
+    Mk(m, p, q, hs, b) => ⊢ parse_lines(
+      HttpRequest::head_lines(HttpRequest::Mk(m, p, q, hs, b))
+    ) = Some(without_body(HttpRequest::Mk(m, p, q, hs, b))) from match p {
+      Text::Mk(pb) => Eq::trans(
+        Eq::congr(
+          ⟦build_request(□, parse_headers(lines(Head::lines(hs, Nil))))⟧,
+          parse_start_line(m, pb, q, yes_left(target_ok(Text::Mk(pb), q), headers_ok(hs), ok))
+        ),
+        Eq::congr(
+          ⟦build_request(Some(Start::Mk(m, Text::Mk(pb), q)), □)⟧,
+          parse_head_lines(hs, Nil, yes_right(target_ok(Text::Mk(pb), q), headers_ok(hs), ok))
+        )
+      )
+    }
+  }
+}
+
+pub theorem headers_budget_length(
+  c: Nat,
+  hs: List(@name Text × @value Text)
+): headers_budget(c, hs) = Nat::add(c, List::length(Head::lines(hs, Nil))) {
+  match hs {
+    Nil => Refl
+    Cons(h, t) => Eq::trans(
+      Eq::congr(⟦Nat::add(Succ(□), List::length(Header::line(h)))⟧, headers_budget_length(c, t)),
+      Eq::trans(
+        Nat::add_assoc(c, Succ(List::length(Head::lines(t, Nil))), List::length(Header::line(h))),
+        Eq::congr(
+          ⟦Nat::add(c, □)⟧,
+          Eq::trans(
+            Nat::add_comm(Succ(List::length(Head::lines(t, Nil))), List::length(Header::line(h))),
+            Eq::sym(List::length_append(Header::line(h), Cons(10, Head::lines(t, Nil))))
+          )
+        )
+      )
+    )
+  }
+}
+
+pub(open) inductive Framing: Type {
+  // No body follows the head.
+  NoBody: Framing
+  // A body of this many bytes (Content-Length).
+  Sized(n: Nat): Framing
+  // A chunked body (Transfer-Encoding: chunked).
+  Chunked: Framing
+  // A response body that ends when the connection closes.
+  ToClose: Framing
+  // The message cannot be read on; answer with this status and close.
+  Refused(status: Status): Framing
+}
+
+pub fn content_length_name(): List(Nat) {
+  Text::bytes("content-length")
+}
+
+pub fn transfer_encoding_name(): List(Nat) {
+  Text::bytes("transfer-encoding")
+}
+
+pub fn digits_on(acc: Nat, bs: List(Nat)): Option(Nat) {
+  match bs {
+    Nil => Some(acc)
+    Cons(b, t) => ⊢ Option(Nat) from match digit_of(b) {
+      None => None
+      Some(d) => digits_on(Nat::add(Nat::mul(acc, 10), d), t)
+    }
+  }
+}
+
+// A decimal number of one or more ASCII digits and nothing else.
+pub fn decimal(bs: List(Nat)): Option(Nat) {
+  match bs {
+    Nil => None
+    Cons(b, t) => digits_on(0, bs)
+  }
+}
+
+// What the Content-Length headers say together.
+pub(open) inductive Length: Type {
+  // There is none.
+  NoLength: Length
+  // Each says this number.
+  LengthIs(n: Nat): Length
+  // One is not a number, or two say different numbers.
+  LengthBad: Length
+}
+
+pub fn length_same(y: Bool, m: Nat): Length {
+  match y {
+    true => LengthIs(m)
+    false => LengthBad
+  }
+}
+
+pub fn length_with(l: Length, v: Option(Nat)): Length {
+  match v {
+    None => LengthBad
+    Some(n) => ⊢ Length from match l {
+      NoLength => LengthIs(n)
+      LengthIs(m) => length_same(Nat::eq(m, n), m)
+      LengthBad => LengthBad
+    }
+  }
+}
+
+pub fn lengths_from(l: Length, vs: List(List(Nat))): Length {
+  match vs {
+    Nil => l
+    Cons(v, t) => lengths_from(length_with(l, decimal(v)), t)
+  }
+}
+
+pub fn content_length_of(hs: List(@name Text × @value Text)): Length {
+  lengths_from(NoLength, Header::values(content_length_name(), hs))
+}
+
+// How the Transfer-Encoding headers end the body.
+pub(open) inductive Coding: Type {
+  // There is none.
+  NoCoding: Coding
+  // One header whose value is `chunked`.
+  JustChunked: Coding
+  // Codings ending in `chunked` with others before it, which this reader cannot undo.
+  OtherChunked: Coding
+  // Codings that do not end in `chunked`, or more than one header.
+  NotChunked: Coding
+}
+
+// Whether the value's last coding is `chunked`.
+pub fn ends_chunked(v: List(Nat)): Bool {
+  bytes_eq_ci(List::reverse(List::take(7, List::reverse(v))), Text::bytes("chunked"))
+}
+
+pub fn coding_one(just: Bool, ends: Bool): Coding {
+  match just {
+    true => JustChunked
+    false => ⊢ Coding from match ends { true => OtherChunked, false => NotChunked }
+  }
+}
+
+pub fn coding_of_values(vs: List(List(Nat))): Coding {
+  match vs {
+    Nil => NoCoding
+    Cons(v, t) => ⊢ Coding from match t {
+      Nil => coding_one(bytes_eq_ci(v, Text::bytes("chunked")), ends_chunked(v))
+      Cons(w, u) => NotChunked
+    }
+  }
+}
+
+pub fn coding_of(hs: List(@name Text × @value Text)): Coding {
+  coding_of_values(Header::values(transfer_encoding_name(), hs))
+}
+
+pub fn sized_or_none(n: Nat): Framing {
+  match n {
+    Zero => NoBody
+    Succ(k) => Sized(n)
+  }
+}
+
+pub fn sized_within(y: Bool, n: Nat): Framing {
+  match y {
+    true => sized_or_none(n)
+    false => Refused(Status::content_too_large())
+  }
+}
+
+pub module HttpResponse {
+  pub fn framing_of(bodyless: Bool, c: Coding, l: Length): Framing {
+    match bodyless {
+      true => NoBody
+      false => ⊢ Framing from match c {
+        NoCoding => ⊢ Framing from match l {
+          NoLength => ToClose
+          LengthIs(n) => sized_or_none(n)
+          LengthBad => Refused(Status::bad_gateway())
+        }
+        JustChunked => ⊢ Framing from match l {
+          NoLength => Chunked
+          LengthIs(n) => Refused(Status::bad_gateway())
+          LengthBad => Refused(Status::bad_gateway())
+        }
+        OtherChunked => Refused(Status::bad_gateway())
+        NotChunked => ⊢ Framing from match l {
+          NoLength => ToClose
+          LengthIs(n) => Refused(Status::bad_gateway())
+          LengthBad => Refused(Status::bad_gateway())
+        }
+      }
+    }
+  }
+
+  // A response's body, given the request's method and the response's status.
+  // A response that cannot be read on is refused with 502.
+  pub fn framing(m: Method, status: Nat, hs: List(@name Text × @value Text)): Framing {
+    HttpResponse::framing_of(bodyless(m, status), coding_of(hs), content_length_of(hs))
+  }
+
+  // ---- a sized body is what every Content-Length says ----------------------------------
+
+  pub theorem framing_sized(
+    b: Bool,
+    c: Coding,
+    l: Length,
+    n: Nat,
+    e: HttpResponse::framing_of(b, c, l) = Sized(n)
+  ): l = LengthIs(n) {
+    match b {
+      true => False::elim(false_ne_true(Eq::congr(is_sized, e)))
+      false => ⊢ l = LengthIs(n) from match c {
+        NoCoding => ⊢ l = LengthIs(n) from match l {
+          NoLength => False::elim(false_ne_true(Eq::congr(is_sized, e)))
+          LengthIs(k) => Eq::congr(LengthIs, sized_or_none_is(k, n, e))
+          LengthBad => False::elim(false_ne_true(Eq::congr(is_sized, e)))
+        }
+        JustChunked => ⊢ l = LengthIs(n) from match l {
+          NoLength => False::elim(false_ne_true(Eq::congr(is_sized, e)))
+          LengthIs(k) => False::elim(false_ne_true(Eq::congr(is_sized, e)))
+          LengthBad => False::elim(false_ne_true(Eq::congr(is_sized, e)))
+        }
+        OtherChunked => False::elim(false_ne_true(Eq::congr(is_sized, e)))
+        NotChunked => ⊢ l = LengthIs(n) from match l {
+          NoLength => False::elim(false_ne_true(Eq::congr(is_sized, e)))
+          LengthIs(k) => False::elim(false_ne_true(Eq::congr(is_sized, e)))
+          LengthBad => False::elim(false_ne_true(Eq::congr(is_sized, e)))
+        }
+      }
+    }
+  }
+
+  // The same for a response.
+  pub theorem sized_lengths(
+    m: Method,
+    status: Nat,
+    hs: List(@name Text × @value Text),
+    n: Nat,
+    e: HttpResponse::framing(m, status, hs) = Sized(n)
+  ): all_say(n, Header::values(content_length_name(), hs)) = true {
+    yes_right(
+      agrees(NoLength, n),
+      all_say(n, Header::values(content_length_name(), hs)),
+      lengths_agree(
+        Header::values(content_length_name(), hs),
+        NoLength,
+        n,
+        HttpResponse::framing_sized(bodyless(m, status), coding_of(hs), content_length_of(hs), n, e)
+      )
+    )
+  }
+
+  // The head's lines of a response as it goes out: its status line, then the
+  // lines `lines` gives for its headers (with `content-length`) and the empty line.
+  pub fn head_lines(r: HttpResponse): List(List(Nat)) {
+    match r {
+      Mk(s, hs, b) => Cons(status_line_bytes(s), lines(Head::lines(sent_headers(hs, b), Nil)))
+    }
+  }
+
+  // What the head reader spends on a response's head, with `c` left over.
+  pub fn head_budget(c: Nat, r: HttpResponse): Nat {
+    match r {
+      Mk(s, hs, b) => Nat::add(
+        Succ(headers_budget(c, sent_headers(hs, b))),
+        List::length(status_line_bytes(s))
+      )
+    }
+  }
+
+  // A client reads the body of a response as it goes out by its length: the
+  // response has a body, whatever Content-Length or Transfer-Encoding it was given.
+  pub theorem framing_sent(
+    m: Method,
+    s: Nat,
+    hs: List(@name Text × @value Text),
+    b: Text,
+    nb: bodyless(m, s) = false
+  ): HttpResponse::framing(m, s, sent_headers(hs, b)) = sized_or_none(Text::len(b)) {
+    Eq::trans(
+      Eq::congr(
+        ⟦HttpResponse::framing_of(
+          □,
+          coding_of(sent_headers(hs, b)),
+          content_length_of(sent_headers(hs, b))
+        )⟧,
+        nb
+      ),
+      Eq::trans(
+        Eq::congr(
+          ⟦HttpResponse::framing_of(false, □, content_length_of(sent_headers(hs, b)))⟧,
+          sent_coding(hs, b)
+        ),
+        Eq::congr(⟦HttpResponse::framing_of(false, NoCoding, □)⟧, sent_length(hs, b))
+      )
+    )
+  }
+
+  // The budget `HttpResponse::head_budget(c, r)` is the length of the response's head
+  // (what `HEAD` is answered with) with `c` to spare.
+  pub theorem head_budget_length(
+    c: Nat,
+    r: HttpResponse
+  ): HttpResponse::head_budget(c, r) = Nat::add(c, Text::len(print_head_bytes(r))) {
+    match r {
+      Mk(s, hs, b) => Eq::trans(
+        Eq::congr(
+          ⟦Nat::add(Succ(□), List::length(status_line_bytes(s)))⟧,
+          headers_budget_length(c, sent_headers(hs, b))
+        ),
+        Eq::trans(
+          Nat::add_assoc(
+            c,
+            Succ(List::length(Head::lines(sent_headers(hs, b), Nil))),
+            List::length(status_line_bytes(s))
+          ),
+          Eq::congr(
+            ⟦Nat::add(c, □)⟧,
+            Eq::trans(
+              Nat::add_comm(
+                Succ(List::length(Head::lines(sent_headers(hs, b), Nil))),
+                List::length(status_line_bytes(s))
+              ),
+              Eq::sym(
+                List::length_append(
+                  status_line_bytes(s),
+                  Cons(10, Head::lines(sent_headers(hs, b), Nil))
+                )
+              )
+            )
+          )
+        )
+      )
+    }
+  }
+}
+
+// Responses to HEAD, and 1xx, 204 and 304 responses, have no body.
+pub fn bodyless(m: Method, status: Nat): Bool {
+  Bool::or(
+    Method::eq(m, Head),
+    Nat::lt(status, 200) || (Nat::eq(status, 204) || Nat::eq(status, 304))
+  )
+}
+
+// Whether a Content-Length value reads as `n`.
+pub fn says(n: Nat, d: Option(Nat)): Bool {
+  match d {
+    None => false
+    Some(k) => Nat::eq(k, n)
+  }
+}
+
+pub fn all_say(n: Nat, vs: List(List(Nat))): Bool {
+  match vs {
+    Nil => true
+    Cons(v, t) => says(n, decimal(v)) && all_say(n, t)
+  }
+}
+
+// Whether what was read so far is consistent with `n`.
+pub fn agrees(l: Length, n: Nat): Bool {
+  match l {
+    NoLength => true
+    LengthIs(m) => Nat::eq(m, n)
+    LengthBad => false
+  }
+}
+
+pub theorem length_same_agrees(
+  y: Bool,
+  m: Nat,
+  k: Nat,
+  n: Nat,
+  ey: Nat::eq(m, k) = y,
+  e: agrees(length_same(y, m), n) = true
+): Bool::and(Nat::eq(m, n), Nat::eq(k, n)) = true {
+  match y {
+    true => Bool::and_intro(
+      Nat::eq(m, n),
+      Nat::eq(k, n),
+      e,
+      Eq::trans(Eq::congr(⟦Nat::eq(□, n)⟧, Eq::sym(Nat::eq_sound(m, k, ey))), e)
+    )
+    false => False::elim(false_ne_true(e))
+  }
+}
+
+pub theorem agrees_with(
+  l: Length,
+  d: Option(Nat),
+  n: Nat,
+  e: agrees(length_with(l, d), n) = true
+): Bool::and(agrees(l, n), says(n, d)) = true {
+  match d {
+    None => False::elim(false_ne_true(e))
+    Some(k) => ⊢ Bool::and(agrees(l, n), says(n, Some(k))) = true from match l {
+      NoLength => e
+      LengthIs(m) => length_same_agrees(Nat::eq(m, k), m, k, n, Refl, e)
+      LengthBad => False::elim(false_ne_true(e))
+    }
+  }
+}
+
+pub theorem lengths_agree(
+  vs: List(List(Nat)),
+  l: Length,
+  n: Nat,
+  e: lengths_from(l, vs) = LengthIs(n)
+): Bool::and(agrees(l, n), all_say(n, vs)) = true {
+  match vs {
+    Nil => Eq::trans(Eq::congr(⟦agrees(□, n) && true⟧, e), Eq::congr(⟦□ && true⟧, Nat::eq_refl(n)))
+    Cons(v, t) => Bool::and_intro(
+      agrees(l, n),
+      says(n, decimal(v)) && all_say(n, t),
+      yes_left(
+        agrees(l, n),
+        says(n, decimal(v)),
+        agrees_with(
+          l,
+          decimal(v),
+          n,
+          yes_left(
+            agrees(length_with(l, decimal(v)), n),
+            all_say(n, t),
+            lengths_agree(t, length_with(l, decimal(v)), n, e)
+          )
+        )
+      ),
+      Bool::and_intro(
+        says(n, decimal(v)),
+        all_say(n, t),
+        yes_right(
+          agrees(l, n),
+          says(n, decimal(v)),
+          agrees_with(
+            l,
+            decimal(v),
+            n,
+            yes_left(
+              agrees(length_with(l, decimal(v)), n),
+              all_say(n, t),
+              lengths_agree(t, length_with(l, decimal(v)), n, e)
+            )
+          )
+        ),
+        yes_right(
+          agrees(length_with(l, decimal(v)), n),
+          all_say(n, t),
+          lengths_agree(t, length_with(l, decimal(v)), n, e)
+        )
+      )
+    )
+  }
+}
+
+pub fn is_sized(f: Framing): Bool {
+  match f {
+    NoBody => false
+    Sized(n) => true
+    Chunked => false
+    ToClose => false
+    Refused(s) => false
+  }
+}
+
+pub fn size_of(f: Framing): Nat {
+  match f {
+    NoBody => Zero
+    Sized(n) => n
+    Chunked => Zero
+    ToClose => Zero
+    Refused(s) => Zero
+  }
+}
+
+pub theorem sized_or_none_is(k: Nat, n: Nat, e: sized_or_none(k) = Sized(n)): k = n {
+  match k {
+    Zero => False::elim(false_ne_true(Eq::congr(is_sized, e)))
+    Succ(j) => Eq::congr(size_of, e)
+  }
+}
+
+pub theorem sized_within_is(y: Bool, k: Nat, n: Nat, e: sized_within(y, k) = Sized(n)): k = n {
+  match y {
+    true => sized_or_none_is(k, n, e)
+    false => False::elim(false_ne_true(Eq::congr(is_sized, e)))
+  }
+}
+
+pub fn is_no_coding(c: Coding): Bool {
+  match c { NoCoding => true, JustChunked => false, OtherChunked => false, NotChunked => false }
+}
+
+pub theorem coding_one_some(just: Bool, ends: Bool, e: coding_one(just, ends) = NoCoding): False {
+  match just {
+    true => false_ne_true(Eq::congr(is_no_coding, e))
+    false => ⊢ False from match ends {
+      true => false_ne_true(Eq::congr(is_no_coding, e))
+      false => false_ne_true(Eq::congr(is_no_coding, e))
+    }
+  }
+}
+
+// Reading no coding means there was no Transfer-Encoding header.
+pub theorem coding_none(vs: List(List(Nat)), e: coding_of_values(vs) = NoCoding): vs = Nil {
+  match vs {
+    Nil => Refl
+    Cons(v, t) => ⊢ Cons(v, t) = Nil from match t {
+      Nil => False::elim(
+        coding_one_some(bytes_eq_ci(v, Text::bytes("chunked")), ends_chunked(v), e)
+      )
+      Cons(w, u) => False::elim(false_ne_true(Eq::congr(is_no_coding, e)))
+    }
+  }
+}
+
+pub theorem example_lengths_differ(): HttpRequest::framing(
+  100,
+  [#(@name "Content-Length", @value "4"), #(@name "content-length", @value "2")]
+) = Refused(Status::bad_request()) { Refl }
+pub theorem example_lengths_same(): HttpRequest::framing(
+  100,
+  [#(@name "Content-Length", @value "4"), #(@name "content-length", @value "4")]
+) = Sized(4) { Refl }
+pub theorem example_length_and_coding(): HttpRequest::framing(
+  100,
+  [#(@name "Content-Length", @value "4"), #(@name "Transfer-Encoding", @value "chunked")]
+) = Refused(Status::bad_request()) { Refl }
+pub theorem example_chunked(): HttpRequest::framing(
+  100,
+  [#(@name "transfer-encoding", @value "Chunked")]
+) = Chunked { Refl }
+pub theorem example_too_long(): HttpRequest::framing(
+  3,
+  [#(@name "Content-Length", @value "4")]
+) = Refused(Status::content_too_large()) { Refl }
+pub theorem example_signed_length(): HttpRequest::framing(
+  100,
+  [#(@name "Content-Length", @value "+4")]
+) = Refused(Status::bad_request()) { Refl }
+pub theorem example_other_coding(): HttpRequest::framing(
+  100,
+  [#(@name "Transfer-Encoding", @value "gzip, chunked")]
+) = Refused(Status::not_implemented()) { Refl }
+pub theorem example_head_response(): HttpResponse::framing(
+  Head,
+  200,
+  [#(@name "Content-Length", @value "4")]
+) = NoBody { Refl }
+pub theorem example_until_close(): HttpResponse::framing(Get, 200, Nil) = ToClose { Refl }
+pub theorem example_not_modified(): HttpResponse::framing(Get, 304, Nil) = NoBody { Refl }
+
+// ---- a chunked body ------------------------------------------------------------------
+//
+//   chunked-body = *chunk last-chunk trailer-section CRLF
+//   chunk        = chunk-size [ chunk-ext ] CRLF chunk-data CRLF
+//   last-chunk   = 1*"0" [ chunk-ext ] CRLF
+//
+// The data of each chunk passes on as it arrives; extensions and trailers are
+// read past and dropped. `room` bounds each size line (with its extension)
+// and the trailer section, so neither can grow without end.
+
+pub(open) inductive Chunks: Type {
+  // A chunk's size: the value so far, whether a digit came, room left on the line.
+  ChunkSize(n: Nat, any: Bool, room: Nat): Chunks
+  // A chunk extension, up to the CR.
+  ChunkExt(n: Nat, room: Nat): Chunks
+  // The size line's CR came.
+  ChunkSizeLf(n: Nat): Chunks
+  // Bytes of data still to come; at zero, the CR after the data.
+  ChunkData(left: Nat): Chunks
+  // The CR after the data came.
+  ChunkDataLf: Chunks
+  // At the start of a trailer line, with room left for the trailers.
+  TrailerStart(room: Nat): Chunks
+  TrailerLine(room: Nat): Chunks
+  TrailerLf(room: Nat): Chunks
+  // The CR of the empty line that ends the body came.
+  ChunksEndLf: Chunks
+  // The body ended.
+  ChunksDone: Chunks
+  // The body is malformed or did not fit its room.
+  ChunksBad: Chunks
+}
+
+pub module Chunks {
+  pub fn start(room: Nat): Chunks {
+    ChunkSize(Zero, false, room)
+  }
+
+  // Feeding a chunked body whose size lines may take `line` bytes each.
+  pub fn feed(line: Nat, c: Chunks, xs: List(Nat)): Fed(Chunks) {
+    http::src::frame::feed((s: Chunks, b: Nat) => Chunk::step(line, s, b), c, xs)
+  }
+
+  // ---- reading what a chunked body says ------------------------------------------------
+
+  pub fn ok(line: Nat, items: List(@size List(Nat) × @data List(Nat))): Bool {
+    match items {
+      Nil => true
+      Cons(p, t) => Chunk::ok(line, p) && Chunks::ok(line, t)
+    }
+  }
+
+  // The chunks on the wire, then the last chunk and the empty line.
+  pub fn wire(items: List(@size List(Nat) × @data List(Nat))): List(Nat) {
+    match items {
+      Nil => Cons(48, Cons(13, Cons(10, Cons(13, Cons(10, Nil)))))
+      Cons(p, t) => List::append(Chunk::wire(chunk_size(p), chunk_data(p)), Chunks::wire(t))
+    }
+  }
+
+  pub fn data(items: List(@size List(Nat) × @data List(Nat))): List(Nat) {
+    match items {
+      Nil => Nil
+      Cons(p, t) => List::append(chunk_data(p), Chunks::data(t))
+    }
+  }
+
+  pub theorem last(
+    c0: Nat,
+    ys: List(Nat)
+  ): Chunks::feed(
+    Succ(Succ(c0)),
+    Chunks::start(Succ(Succ(c0))),
+    Cons(48, Cons(13, Cons(10, Cons(13, Cons(10, ys)))))
+  ) = Fed::Mk(ChunksDone, Nil, ys) {
+    ⊢ Chunks::feed(
+      Succ(Succ(c0)),
+      Chunks::start(Succ(Succ(c0))),
+      Cons(48, Cons(13, Cons(10, Cons(13, Cons(10, ys)))))
+    ) = Fed::Mk(ChunksDone, Nil, ys) from match ys {
+      Nil => Refl
+      Cons(y, u) => Refl
+    }
+  }
+}
+
+// The value of an ASCII hex digit, in either case.
+pub fn hex_of(b: Nat): Option(Nat) {
+  match digit_of(b) {
+    Some(d) => Some(d)
+    None => ⊢ Option(Nat) from match Nat::le(97, b) && Nat::le(b, 102) {
+      true => Some(Nat::sub(b, 87))
+      false => ⊢ Option(Nat) from match Nat::le(65, b) && Nat::le(b, 70) {
+        true => Some(Nat::sub(b, 55))
+        false => None
+      }
+    }
+  }
+}
+
+pub fn took(c: Chunks): Option(@state Chunks × @rest List(Nat)) {
+  Some(#(@state c, @rest List::Nil(<A: Nat>)))
+}
+
+// A byte of the size line once it is not a hex digit: `;` starts an
+// extension and CR ends the line, each after at least one digit.
+pub fn size_other(any: Bool, b: Nat, n: Nat, room: Nat): Chunks {
+  match any {
+    false => ChunksBad
+    true => ⊢ Chunks from match Nat::eq(b, 13) {
+      true => ChunkSizeLf(n)
+      false => ⊢ Chunks from match Nat::eq(b, 59) {
+        true => ChunkExt(n, room)
+        false => ChunksBad
+      }
+    }
+  }
+}
+
+pub fn size_byte(h: Option(Nat), any: Bool, b: Nat, n: Nat, room: Nat): Chunks {
+  match h {
+    Some(d) => ChunkSize(Nat::add(Nat::mul(n, 16), d), true, room)
+    None => size_other(any, b, n, room)
+  }
+}
+
+// After the size line: a size of zero starts the trailers.
+pub fn size_end(lf: Bool, n: Nat, room: Nat): Chunks {
+  match lf {
+    false => ChunksBad
+    true => ⊢ Chunks from match n {
+      Zero => TrailerStart(room)
+      Succ(k) => ChunkData(n)
+    }
+  }
+}
+
+pub fn ext_byte(cr: Bool, lf: Bool, n: Nat, room: Nat): Chunks {
+  match cr {
+    true => ChunkSizeLf(n)
+    false => ⊢ Chunks from match lf {
+      true => ChunksBad
+      false => ChunkExt(n, room)
+    }
+  }
+}
+
+pub fn expect(y: Bool, next: Chunks): Chunks {
+  match y { true => next, false => ChunksBad }
+}
+
+pub fn trailer_first(cr: Bool, lf: Bool, room: Nat): Chunks {
+  match cr {
+    true => ChunksEndLf
+    false => ⊢ Chunks from match lf {
+      true => ChunksBad
+      false => TrailerLine(room)
+    }
+  }
+}
+
+pub fn trailer_byte(cr: Bool, lf: Bool, room: Nat): Chunks {
+  match cr {
+    true => TrailerLf(room)
+    false => ⊢ Chunks from match lf {
+      true => ChunksBad
+      false => TrailerLine(room)
+    }
+  }
+}
+
+pub module Chunk {
+  // One byte of a chunked body; `line` is the room each size line starts with.
+  pub fn step(line: Nat, c: Chunks, b: Nat): Option(@state Chunks × @rest List(Nat)) {
+    match c {
+      ChunkSize(n, any, room) => ⊢ Option(@state Chunks × @rest List(Nat)) from match room {
+        Zero => took(ChunksBad)
+        Succ(r) => took(size_byte(hex_of(b), any, b, n, r))
+      }
+      ChunkExt(n, room) => ⊢ Option(@state Chunks × @rest List(Nat)) from match room {
+        Zero => took(ChunksBad)
+        Succ(r) => took(ext_byte(Nat::eq(b, 13), Nat::eq(b, 10), n, r))
+      }
+      ChunkSizeLf(n) => took(size_end(Nat::eq(b, 10), n, line))
+      ChunkData(left) => ⊢ Option(@state Chunks × @rest List(Nat)) from match left {
+        Zero => took(expect(Nat::eq(b, 13), ChunkDataLf))
+        Succ(k) => Some(#(@state ChunkData(k), @rest Cons(b, Nil)))
+      }
+      ChunkDataLf => took(expect(Nat::eq(b, 10), Chunks::start(line)))
+      TrailerStart(room) => ⊢ Option(@state Chunks × @rest List(Nat)) from match room {
+        Zero => took(ChunksBad)
+        Succ(r) => took(trailer_first(Nat::eq(b, 13), Nat::eq(b, 10), r))
+      }
+      TrailerLine(room) => ⊢ Option(@state Chunks × @rest List(Nat)) from match room {
+        Zero => took(ChunksBad)
+        Succ(r) => took(trailer_byte(Nat::eq(b, 13), Nat::eq(b, 10), r))
+      }
+      TrailerLf(room) => took(expect(Nat::eq(b, 10), TrailerStart(room)))
+      ChunksEndLf => took(expect(Nat::eq(b, 10), ChunksDone))
+      ChunksDone => None
+      ChunksBad => None
+    }
+  }
+
+  // The data of a chunk passes on as it comes.
+  pub theorem data_bytes(
+    line: Nat,
+    data: List(Nat),
+    ys: List(Nat)
+  ): Chunks::feed(
+    line,
+    ChunkData(List::length(data)),
+    List::append(data, ys)
+  ) = fed_prepend(data, Chunks::feed(line, ChunkData(Zero), ys)) {
+    ⊢ Chunks::feed(
+      line,
+      ChunkData(List::length(data)),
+      List::append(data, ys)
+    ) = fed_prepend(data, Chunks::feed(line, ChunkData(Zero), ys)) from match data {
+      Nil => Eq::sym(fed_prepend_nil(Chunks::feed(line, ChunkData(Zero), ys)))
+      Cons(b, t) => Eq::trans(
+        Eq::congr(⟦fed_prepend(Cons(b, Nil), □)⟧, Chunk::data_bytes(line, t, ys)),
+        fed_prepend_prepend(Cons(b, Nil), t, Chunks::feed(line, ChunkData(Zero), ys))
+      )
+    }
+  }
+
+  // The CR and LF after the data start the next chunk.
+  pub theorem data_end(
+    line: Nat,
+    ys: List(Nat)
+  ): Chunks::feed(
+    line,
+    ChunkData(Zero),
+    Cons(13, Cons(10, ys))
+  ) = Chunks::feed(line, Chunks::start(line), ys) {
+    Eq::trans(
+      fed_prepend_nil(fed_prepend(Nil, Chunks::feed(line, Chunks::start(line), ys))),
+      fed_prepend_nil(Chunks::feed(line, Chunks::start(line), ys))
+    )
+  }
+
+  // A chunk on the wire: its size in hex digits `ds`, CR LF, the data, CR LF.
+  pub fn wire(ds: List(Nat), data: List(Nat)): List(Nat) {
+    List::append(ds, Cons(13, Cons(10, List::append(data, Cons(13, Cons(10, Nil))))))
+  }
+
+  pub theorem wire_append(
+    ds: List(Nat),
+    data: List(Nat),
+    ys: List(Nat)
+  ): List::append(
+    Chunk::wire(ds, data),
+    ys
+  ) = List::append(ds, Cons(13, Cons(10, List::append(data, Cons(13, Cons(10, ys)))))) {
+    Eq::trans(
+      List::append_assoc(ds, Cons(13, Cons(10, List::append(data, Cons(13, Cons(10, Nil))))), ys),
+      Eq::congr(
+        ⟦List::append(ds, Cons(13, Cons(10, □)))⟧,
+        List::append_assoc(data, Cons(13, Cons(10, Nil)), ys)
+      )
+    )
+  }
+
+  // One chunk whose digits say the length of its nonempty data, and whose
+  // size line fits `line` with `c` to spare.
+  pub theorem read(
+    line: Nat,
+    ds: List(Nat),
+    b: Nat,
+    t: List(Nat),
+    ys: List(Nat),
+    c: Nat,
+    hex: Hex::all(ds) = true,
+    says: Hex::fold(Zero, ds) = List::length(Cons(b, t)),
+    any: any_after(false, ds) = true,
+    fits: Nat::add(Succ(c), List::length(ds)) = line
+  ): Chunks::feed(
+    line,
+    Chunks::start(line),
+    List::append(Chunk::wire(ds, Cons(b, t)), ys)
+  ) = fed_prepend(Cons(b, t), Chunks::feed(line, Chunks::start(line), ys)) {
+    Eq::trans(
+      Eq::congr(
+        ⟦Chunks::feed(line, Chunks::start(line), □)⟧,
+        Chunk::wire_append(ds, Cons(b, t), ys)
+      ),
+      Eq::trans(
+        Eq::congr(
+          ⟦Chunks::feed(
+            line,
+            ChunkSize(Zero, false, □),
+            List::append(ds, Cons(13, Cons(10, List::append(Cons(b, t), Cons(13, Cons(10, ys))))))
+          )⟧,
+          Eq::sym(fits)
+        ),
+        Eq::trans(
+          size_digits(
+            line,
+            ds,
+            Cons(13, Cons(10, List::append(Cons(b, t), Cons(13, Cons(10, ys))))),
+            Zero,
+            false,
+            Succ(c),
+            hex
+          ),
+          Eq::trans(
+            Eq::congr(
+              ⟦Chunks::feed(
+                line,
+                ChunkSize(Hex::fold(Zero, ds), □, Succ(c)),
+                Cons(13, Cons(10, List::append(Cons(b, t), Cons(13, Cons(10, ys)))))
+              )⟧,
+              any
+            ),
+            Eq::trans(
+              Eq::congr(
+                ⟦Chunks::feed(
+                  line,
+                  ChunkSize(□, true, Succ(c)),
+                  Cons(13, Cons(10, List::append(Cons(b, t), Cons(13, Cons(10, ys)))))
+                )⟧,
+                says
+              ),
+              Eq::trans(
+                size_line_end(
+                  line,
+                  List::length(t),
+                  c,
+                  List::append(Cons(b, t), Cons(13, Cons(10, ys)))
+                ),
+                Eq::trans(
+                  Chunk::data_bytes(line, Cons(b, t), Cons(13, Cons(10, ys))),
+                  Eq::congr(⟦fed_prepend(Cons(b, t), □)⟧, Chunk::data_end(line, ys))
+                )
+              )
+            )
+          )
+        )
+      )
+    )
+  }
+
+  pub fn ok_with(o: Option(Nat), ds: List(Nat), data: List(Nat)): Bool {
+    match o {
+      None => false
+      Some(c) => ⊢ Bool from match data {
+        Nil => false
+        Cons(b, t) => Hex::all(ds) && (
+          Nat::eq(Hex::fold(Zero, ds), List::length(data)) && any_after(false, ds)
+        )
+      }
+    }
+  }
+
+  // A chunk the reader takes whole: hex digits that say the length of its
+  // nonempty data, on a size line that fits `line`.
+  pub fn ok(line: Nat, p: @size List(Nat) × @data List(Nat)): Bool {
+    match p {
+      #(@size s, @data d) => Chunk::ok_with(room_left(Succ(List::length(s)), line), s, d)
+    }
+  }
+
+  pub theorem ok_read(
+    line: Nat,
+    ds: List(Nat),
+    data: List(Nat),
+    o: Option(Nat),
+    eo: room_left(Succ(List::length(ds)), line) = o,
+    ok: Chunk::ok_with(o, ds, data) = true,
+    ys: List(Nat)
+  ): Chunks::feed(
+    line,
+    Chunks::start(line),
+    List::append(Chunk::wire(ds, data), ys)
+  ) = fed_prepend(data, Chunks::feed(line, Chunks::start(line), ys)) {
+    ⊢ Chunks::feed(
+      line,
+      Chunks::start(line),
+      List::append(Chunk::wire(ds, data), ys)
+    ) = fed_prepend(data, Chunks::feed(line, Chunks::start(line), ys)) from match o {
+      None => False::elim(false_ne_true(ok))
+      Some(c) => ⊢ Chunks::feed(
+        line,
+        Chunks::start(line),
+        List::append(Chunk::wire(ds, data), ys)
+      ) = fed_prepend(data, Chunks::feed(line, Chunks::start(line), ys)) from match data {
+        Nil => False::elim(false_ne_true(ok))
+        Cons(b, t) => Chunk::read(
+          line,
+          ds,
+          b,
+          t,
+          ys,
+          c,
+          yes_left(
+            Hex::all(ds),
+            Nat::eq(Hex::fold(Zero, ds), List::length(Cons(b, t))) && any_after(false, ds),
+            ok
+          ),
+          Nat::eq_sound(
+            Hex::fold(Zero, ds),
+            List::length(Cons(b, t)),
+            yes_left(
+              Nat::eq(Hex::fold(Zero, ds), List::length(Cons(b, t))),
+              any_after(false, ds),
+              yes_right(
+                Hex::all(ds),
+                Nat::eq(Hex::fold(Zero, ds), List::length(Cons(b, t))) && any_after(false, ds),
+                ok
+              )
+            )
+          ),
+          yes_right(
+            Nat::eq(Hex::fold(Zero, ds), List::length(Cons(b, t))),
+            any_after(false, ds),
+            yes_right(
+              Hex::all(ds),
+              Nat::eq(Hex::fold(Zero, ds), List::length(Cons(b, t))) && any_after(false, ds),
+              ok
+            )
+          ),
+          Eq::trans(
+            Nat::add_succ_left(c, List::length(ds)),
+            room_left_add(Succ(List::length(ds)), line, c, eo)
+          )
+        )
+      }
+    }
+  }
+
+  pub theorem ok_pair(
+    line: Nat,
+    p: @size List(Nat) × @data List(Nat),
+    ok: Chunk::ok(line, p) = true
+  ): Chunk::ok_with(
+    room_left(Succ(List::length(chunk_size(p))), line),
+    chunk_size(p),
+    chunk_data(p)
+  ) = true {
+    ⊢ Chunk::ok_with(
+      room_left(Succ(List::length(chunk_size(p))), line),
+      chunk_size(p),
+      chunk_data(p)
+    ) = true from match p {
+      #(@size s, @data d) => ok
+    }
+  }
+
+  // ---- writing a chunked body ----------------------------------------------------------
+
+  // Each nonempty piece as a chunk: its length in hex, then the piece. An
+  // empty piece would read as the end of the body, so it is left out.
+  pub fn items(pieces: List(List(Nat))): List(@size List(Nat) × @data List(Nat)) {
+    match pieces {
+      Nil => Nil
+      Cons(d, t) => ⊢ List(@size List(Nat) × @data List(Nat)) from match d {
+        Nil => Chunk::items(t)
+        Cons(b, u) => Cons(#(@size hex_text(List::length(d)), @data d), Chunk::items(t))
+      }
+    }
+  }
+
+  // One piece as one chunk, its length in hex and then the piece; nothing for an
+  // empty piece. For a body that passes on as it is made, a piece at a time.
+  pub fn bytes(piece: List(Nat)): List(Nat) {
+    match piece {
+      Nil => Nil
+      Cons(b, u) => Chunk::wire(hex_text(List::length(piece)), piece)
+    }
+  }
+
+  pub theorem ok_hex(
+    o: Option(Nat),
+    fit: is_some_nat(o) = true,
+    b: Nat,
+    t: List(Nat)
+  ): Chunk::ok_with(o, hex_text(List::length(Cons(b, t))), Cons(b, t)) = true {
+    match o {
+      None => False::elim(false_ne_true(fit))
+      Some(c) => Bool::and_intro(
+        Hex::all(hex_text(List::length(Cons(b, t)))),
+        Bool::and(
+          Nat::eq(Hex::fold(Zero, hex_text(List::length(Cons(b, t)))), List::length(Cons(b, t))),
+          any_after(false, hex_text(List::length(Cons(b, t))))
+        ),
+        Hex::all_digits(Succ(List::length(Cons(b, t))), List::length(Cons(b, t)), Nil),
+        Bool::and_intro(
+          Nat::eq(Hex::fold(Zero, hex_text(List::length(Cons(b, t)))), List::length(Cons(b, t))),
+          any_after(false, hex_text(List::length(Cons(b, t)))),
+          Eq::trans(
+            Eq::congr(
+              ⟦Nat::eq(□, List::length(Cons(b, t)))⟧,
+              Hex::text_value(List::length(Cons(b, t)))
+            ),
+            Nat::eq_refl(List::length(Cons(b, t)))
+          ),
+          Hex::text_some(List::length(Cons(b, t)))
+        )
+      )
+    }
+  }
+
+  // The chunks the writer makes are ones the reader takes whole.
+  pub theorem items_ok(
+    line: Nat,
+    pieces: List(List(Nat)),
+    fits: size_lines_fit(line, pieces) = true
+  ): Chunks::ok(line, Chunk::items(pieces)) = true {
+    match pieces {
+      Nil => Refl
+      Cons(d, t) => ⊢ Chunks::ok(line, Chunk::items(Cons(d, t))) = true from match d {
+        Nil => Chunk::items_ok(
+          line,
+          t,
+          yes_right(size_line_fits(line, Nil), size_lines_fit(line, t), fits)
+        )
+        Cons(b, u) => Bool::and_intro(
+          Chunk::ok(line, #(@size hex_text(List::length(Cons(b, u))), @data Cons(b, u))),
+          Chunks::ok(line, Chunk::items(t)),
+          Chunk::ok_hex(
+            room_left(Succ(List::length(hex_text(List::length(Cons(b, u))))), line),
+            yes_left(size_line_fits(line, Cons(b, u)), size_lines_fit(line, t), fits),
+            b,
+            u
+          ),
+          Chunk::items_ok(
+            line,
+            t,
+            yes_right(size_line_fits(line, Cons(b, u)), size_lines_fit(line, t), fits)
+          )
+        )
+      }
+    }
+  }
+
+  pub theorem items_data(
+    pieces: List(List(Nat))
+  ): Chunks::data(Chunk::items(pieces)) = List::concat(pieces) {
+    match pieces {
+      Nil => Refl
+      Cons(d, t) => ⊢ Chunks::data(
+        Chunk::items(Cons(d, t))
+      ) = List::concat(Cons(d, t)) from match d {
+        Nil => Chunk::items_data(t)
+        Cons(b, u) => Eq::congr(⟦List::append(Cons(b, u), □)⟧, Chunk::items_data(t))
+      }
+    }
+  }
+}
+
+pub fn is_some_nat(o: Option(Nat)): Bool {
+  match o {
+    None => false
+    Some(d) => true
+  }
+}
+
+pub module Hex {
+  // Every byte is a hex digit.
+  pub fn all(ds: List(Nat)): Bool {
+    match ds {
+      Nil => true
+      Cons(b, t) => is_some_nat(hex_of(b)) && Hex::all(t)
+    }
+  }
+
+  pub fn pick(o: Option(Nat), n: Nat, k: (Nat) -> Nat): Nat {
+    match o {
+      None => n
+      Some(d) => k(Nat::add(Nat::mul(n, 16), d))
+    }
+  }
+
+  // The value of hex digits after `n`.
+  pub fn fold(n: Nat, ds: List(Nat)): Nat {
+    match ds {
+      Nil => n
+      Cons(b, t) => Hex::pick(hex_of(b), n, (m: Nat) => Hex::fold(m, t))
+    }
+  }
+
+  pub fn digits(fuel: Nat, n: Nat, acc: List(Nat)): List(Nat) {
+    match fuel {
+      Zero => acc
+      Succ(f) => ⊢ List(Nat) from match Nat::eq(Nat::div_nz(n, 16, Nat::succ_ne_zero(15)), 0) {
+        true => Cons(hex_digit(Nat::rem_nz(n, 16, Nat::succ_ne_zero(15))), acc)
+        false => Hex::digits(
+          f,
+          Nat::div_nz(n, 16, Nat::succ_ne_zero(15)),
+          Cons(hex_digit(Nat::rem_nz(n, 16, Nat::succ_ne_zero(15))), acc)
+        )
+      }
+    }
+  }
+
+  // Every digit below `k` reads back as its value.
+  pub fn rounds(k: Nat): Bool {
+    match k {
+      Zero => true
+      Succ(j) => some_is(hex_of(hex_digit(j)), j) && Hex::rounds(j)
+    }
+  }
+
+  pub theorem rounds_at(
+    j: Nat,
+    d: Nat,
+    y: Bool,
+    e: Nat::eq(d, j) = y,
+    h: Nat::lt(d, Succ(j)) = true,
+    all: Hex::rounds(Succ(j)) = true,
+    ih: (d2: Nat, h2: Nat::lt(d2, j) = true) -> some_is(hex_of(hex_digit(d2)), d2) = true
+  ): some_is(hex_of(hex_digit(d)), d) = true {
+    match y {
+      true => Eq::trans(
+        Eq::congr((x: Nat) => some_is(hex_of(hex_digit(x)), x), Nat::eq_sound(d, j, e)),
+        And::left(Bool::and_split(some_is(hex_of(hex_digit(j)), j), Hex::rounds(j), all))
+      )
+      false => ih(d, Nat::lt_succ_ne(d, j, h, e))
+    }
+  }
+
+  pub theorem rounds_below(
+    k: Nat,
+    d: Nat,
+    h: Nat::lt(d, k) = true,
+    all: Hex::rounds(k) = true
+  ): some_is(hex_of(hex_digit(d)), d) = true {
+    match k {
+      Zero => False::elim(false_ne_true(Eq::trans(Eq::sym(Nat::lt_zero_false(d)), h)))
+      Succ(j) => Hex::rounds_at(
+        j,
+        d,
+        Nat::eq(d, j),
+        Refl,
+        h,
+        all,
+        (d2: Nat, h2: Nat::lt(d2, j) = true) => Hex::rounds_below(
+          j,
+          d2,
+          h2,
+          And::right(Bool::and_split(some_is(hex_of(hex_digit(j)), j), Hex::rounds(j), all))
+        )
+      )
+    }
+  }
+
+  // Each hex digit the writer writes reads back as its value.
+  pub theorem digit_of(d0: Nat, h: Nat::lt(d0, 16) = true): hex_of(hex_digit(d0)) = Some(d0) {
+    some_is_sound(hex_of(hex_digit(d0)), d0, Hex::rounds_below(16, d0, h, Refl))
+  }
+
+  pub fn step(y: Bool, f: Nat, n: Nat, acc: List(Nat)): List(Nat) {
+    match y {
+      true => Cons(hex_digit(Nat::rem_nz(n, 16, Nat::succ_ne_zero(15))), acc)
+      false => Hex::digits(
+        f,
+        Nat::div_nz(n, 16, Nat::succ_ne_zero(15)),
+        Cons(hex_digit(Nat::rem_nz(n, 16, Nat::succ_ne_zero(15))), acc)
+      )
+    }
+  }
+
+  pub theorem digits_step(
+    f: Nat,
+    n: Nat,
+    acc: List(Nat)
+  ): Hex::digits(
+    Succ(f),
+    n,
+    acc
+  ) = Hex::step(Nat::eq(Nat::div_nz(n, 16, Nat::succ_ne_zero(15)), 0), f, n, acc) {
+    Refl
+  }
+
+  pub theorem low_ok(n: Nat): is_some_nat(
+    hex_of(hex_digit(Nat::rem_nz(n, 16, Nat::succ_ne_zero(15))))
+  ) = true {
+    Eq::congr(
+      is_some_nat,
+      Hex::digit_of(Nat::rem_nz(n, 16, Nat::succ_ne_zero(15)), Nat::mod_succ_lt(n, 15))
+    )
+  }
+
+  pub theorem all_step(
+    y: Bool,
+    g: Nat,
+    n: Nat,
+    acc: List(Nat),
+    ih: (m: Nat, a: List(Nat)) -> Hex::all(Hex::digits(g, m, a)) = Hex::all(a)
+  ): Hex::all(Hex::step(y, g, n, acc)) = Hex::all(acc) {
+    match y {
+      true => Eq::congr(⟦□ && Hex::all(acc)⟧, Hex::low_ok(n))
+      false => Eq::trans(
+        ih(
+          Nat::div_nz(n, 16, Nat::succ_ne_zero(15)),
+          Cons(hex_digit(Nat::rem_nz(n, 16, Nat::succ_ne_zero(15))), acc)
+        ),
+        Eq::congr(⟦□ && Hex::all(acc)⟧, Hex::low_ok(n))
+      )
+    }
+  }
+
+  // Every byte the writer puts before `acc` is a hex digit.
+  pub theorem all_digits(
+    f: Nat,
+    n: Nat,
+    acc: List(Nat)
+  ): Hex::all(Hex::digits(f, n, acc)) = Hex::all(acc) {
+    match f {
+      Zero => Refl
+      Succ(g) => Eq::trans(
+        Eq::congr(Hex::all, Hex::digits_step(g, n, acc)),
+        Hex::all_step(
+          Nat::eq(Nat::div_nz(n, 16, Nat::succ_ne_zero(15)), 0),
+          g,
+          n,
+          acc,
+          (m: Nat, a: List(Nat)) => Hex::all_digits(g, m, a)
+        )
+      )
+    }
+  }
+
+  pub theorem some_step(
+    y: Bool,
+    g: Nat,
+    n: Nat,
+    acc: List(Nat),
+    ih: (
+      m: Nat,
+      a: List(Nat)
+    ) -> any_after(
+      false,
+      Hex::digits(g, m, Cons(hex_digit(Nat::rem_nz(n, 16, Nat::succ_ne_zero(15))), a))
+    ) = true
+  ): any_after(false, Hex::step(y, g, n, acc)) = true {
+    match y {
+      true => Refl
+      false => ih(Nat::div_nz(n, 16, Nat::succ_ne_zero(15)), acc)
+    }
+  }
+
+  // The writer puts down at least one digit before a nonempty `acc`.
+  pub theorem some_digits(
+    f: Nat,
+    n: Nat,
+    x: Nat,
+    acc: List(Nat)
+  ): any_after(false, Hex::digits(f, n, Cons(x, acc))) = true {
+    match f {
+      Zero => Refl
+      Succ(g) => Eq::trans(
+        Eq::congr(⟦any_after(false, □)⟧, Hex::digits_step(g, n, Cons(x, acc))),
+        Hex::some_step(
+          Nat::eq(Nat::div_nz(n, 16, Nat::succ_ne_zero(15)), 0),
+          g,
+          n,
+          Cons(x, acc),
+          (m: Nat, a: List(Nat)) => Hex::some_digits(
+            g,
+            m,
+            hex_digit(Nat::rem_nz(n, 16, Nat::succ_ne_zero(15))),
+            a
+          )
+        )
+      )
+    }
+  }
+
+  pub theorem text_some(n: Nat): any_after(false, hex_text(n)) = true {
+    Eq::trans(
+      Eq::congr(⟦any_after(false, □)⟧, Hex::digits_step(n, n, Nil)),
+      Hex::some_step(
+        Nat::eq(Nat::div_nz(n, 16, Nat::succ_ne_zero(15)), 0),
+        n,
+        n,
+        Nil,
+        (m: Nat, a: List(Nat)) => Hex::some_digits(
+          n,
+          m,
+          hex_digit(Nat::rem_nz(n, 16, Nat::succ_ne_zero(15))),
+          a
+        )
+      )
+    )
+  }
+
+  // ---- the value the digits say --------------------------------------------------------
+
+  // The low digit, read after `m`.
+  pub theorem fold_low(
+    m: Nat,
+    n: Nat,
+    acc: List(Nat)
+  ): Hex::fold(
+    m,
+    Cons(hex_digit(Nat::rem_nz(n, 16, Nat::succ_ne_zero(15))), acc)
+  ) = Hex::fold(Nat::add(Nat::mul(m, 16), Nat::rem_nz(n, 16, Nat::succ_ne_zero(15))), acc) {
+    Eq::congr(
+      (o: Option(Nat)) => Hex::pick(o, m, (x: Nat) => Hex::fold(x, acc)),
+      Hex::digit_of(Nat::rem_nz(n, 16, Nat::succ_ne_zero(15)), Nat::mod_succ_lt(n, 15))
+    )
+  }
+
+  pub theorem small(
+    n: Nat,
+    e: Nat::eq(Nat::div_nz(n, 16, Nat::succ_ne_zero(15)), 0) = true
+  ): Nat::add(Nat::mul(Zero, 16), Nat::rem_nz(n, 16, Nat::succ_ne_zero(15))) = n {
+    Eq::trans(
+      Eq::congr(
+        ⟦Nat::add(Nat::mul(16, □), Nat::rem_nz(n, 16, Nat::succ_ne_zero(15)))⟧,
+        Eq::sym(Nat::eq_sound(Nat::div_nz(n, 16, Nat::succ_ne_zero(15)), 0, e))
+      ),
+      Nat::div_mod_eq(n, 16, Nat::succ_ne_zero(15))
+    )
+  }
+
+  pub theorem back(n: Nat): Nat::add(
+    Nat::mul(Nat::div_nz(n, 16, Nat::succ_ne_zero(15)), 16),
+    Nat::rem_nz(n, 16, Nat::succ_ne_zero(15))
+  ) = n {
+    Eq::trans(
+      Eq::congr(
+        ⟦Nat::add(□, Nat::rem_nz(n, 16, Nat::succ_ne_zero(15)))⟧,
+        Nat::mul_comm(Nat::div_nz(n, 16, Nat::succ_ne_zero(15)), 16)
+      ),
+      Nat::div_mod_eq(n, 16, Nat::succ_ne_zero(15))
+    )
+  }
+
+  pub theorem fold_one(
+    n: Nat,
+    acc: List(Nat),
+    h: Nat::lt(n, Succ(Zero)) = true
+  ): Hex::fold(Zero, Hex::digits(Succ(Zero), n, acc)) = Hex::fold(n, acc) {
+    match n {
+      Zero => Refl
+      Succ(m) => False::elim(false_ne_true(Eq::trans(Eq::sym(Nat::lt_zero_false(m)), h)))
+    }
+  }
+
+  pub theorem fold_step(
+    y: Bool,
+    g: Nat,
+    n: Nat,
+    acc: List(Nat),
+    e: Nat::eq(Nat::div_nz(n, 16, Nat::succ_ne_zero(15)), 0) = y,
+    h: Nat::lt(n, Succ(Succ(g))) = true,
+    ih: (
+      m: Nat,
+      a: List(Nat),
+      hm: Nat::lt(m, Succ(g)) = true
+    ) -> Hex::fold(Zero, Hex::digits(Succ(g), m, a)) = Hex::fold(m, a)
+  ): Hex::fold(Zero, Hex::step(y, Succ(g), n, acc)) = Hex::fold(n, acc) {
+    match y {
+      true => Eq::trans(
+        Hex::fold_low(Zero, n, acc),
+        Eq::congr(⟦Hex::fold(□, acc)⟧, Hex::small(n, e))
+      )
+      false => Eq::trans(
+        ih(
+          Nat::div_nz(n, 16, Nat::succ_ne_zero(15)),
+          Cons(hex_digit(Nat::rem_nz(n, 16, Nat::succ_ne_zero(15))), acc),
+          div_16_fuel(n, g, e, h)
+        ),
+        Eq::trans(
+          Hex::fold_low(Nat::div_nz(n, 16, Nat::succ_ne_zero(15)), n, acc),
+          Eq::congr(⟦Hex::fold(□, acc)⟧, Hex::back(n))
+        )
+      )
+    }
+  }
+
+  // With enough fuel, the digits the writer puts before `acc` read back as `n`.
+  pub theorem fold_digits(
+    f: Nat,
+    n: Nat,
+    acc: List(Nat),
+    h: Nat::lt(n, Succ(f)) = true
+  ): Hex::fold(Zero, Hex::digits(Succ(f), n, acc)) = Hex::fold(n, acc) {
+    match f {
+      Zero => Hex::fold_one(n, acc, h)
+      Succ(g) => Eq::trans(
+        Eq::congr(⟦Hex::fold(Zero, □)⟧, Hex::digits_step(Succ(g), n, acc)),
+        Hex::fold_step(
+          Nat::eq(Nat::div_nz(n, 16, Nat::succ_ne_zero(15)), 0),
+          g,
+          n,
+          acc,
+          Refl,
+          h,
+          (m: Nat, a: List(Nat), hm: Nat::lt(m, Succ(g)) = true) => Hex::fold_digits(g, m, a, hm)
+        )
+      )
+    }
+  }
+
+  pub theorem text_value(n: Nat): Hex::fold(Zero, hex_text(n)) = n {
+    Hex::fold_digits(n, n, Nil, Nat::lt_succ_self(n))
+  }
+
+  // ---- what the writer writes, the reader reads ------------------------------------------
+
+  pub theorem len_zero(
+    y: Bool,
+    n: Nat,
+    acc: List(Nat),
+    k: Nat
+  ): Nat::le(List::length(Hex::step(y, Zero, n, acc)), Nat::add(List::length(acc), Succ(k))) = true {
+    ⊢ Nat::le(
+      List::length(Hex::step(y, Zero, n, acc)),
+      Nat::add(List::length(acc), Succ(k))
+    ) = true from match y {
+      true => le_add_right(List::length(acc), k)
+      false => le_add_right(List::length(acc), k)
+    }
+  }
+
+  pub theorem len_step(
+    y: Bool,
+    g: Nat,
+    n: Nat,
+    acc: List(Nat),
+    k: Nat,
+    e: Nat::eq(Nat::div_nz(n, 16, Nat::succ_ne_zero(15)), 0) = y,
+    h: Nat::lt(n, pow16(Succ(k))) = true,
+    ih: (
+      m: Nat,
+      a: List(Nat),
+      j: Nat,
+      hm: Nat::lt(m, pow16(Succ(j))) = true
+    ) -> Nat::le(List::length(Hex::digits(Succ(g), m, a)), Nat::add(List::length(a), Succ(j))) = true
+  ): Nat::le(
+    List::length(Hex::step(y, Succ(g), n, acc)),
+    Nat::add(List::length(acc), Succ(k))
+  ) = true {
+    ⊢ Nat::le(
+      List::length(Hex::step(y, Succ(g), n, acc)),
+      Nat::add(List::length(acc), Succ(k))
+    ) = true from match y {
+      true => le_add_right(List::length(acc), k)
+      false => ⊢ Nat::le(
+        List::length(Hex::step(false, Succ(g), n, acc)),
+        Nat::add(List::length(acc), Succ(k))
+      ) = true from match k {
+        Zero => False::elim(true_ne_false(Eq::trans(Eq::sym(div_16_small(n, h)), e)))
+        Succ(k2) => Eq::trans(
+          Eq::congr(
+            ⟦Nat::le(
+              List::length(
+                Hex::digits(
+                  Succ(g),
+                  Nat::div_nz(n, 16, Nat::succ_ne_zero(15)),
+                  Cons(hex_digit(Nat::rem_nz(n, 16, Nat::succ_ne_zero(15))), acc)
+                )
+              ),
+              Succ(□)
+            )⟧,
+            Eq::sym(Nat::add_succ_left(List::length(acc), k2))
+          ),
+          ih(
+            Nat::div_nz(n, 16, Nat::succ_ne_zero(15)),
+            Cons(hex_digit(Nat::rem_nz(n, 16, Nat::succ_ne_zero(15))), acc),
+            k2,
+            div_16_below_of(n, pow16(Succ(k2)), h)
+          )
+        )
+      }
+    }
+  }
+
+  // Below `16^(k+1)`, the writer puts down at most `k + 1` digits.
+  pub theorem len_digits(
+    f: Nat,
+    n: Nat,
+    acc: List(Nat),
+    k: Nat,
+    h: Nat::lt(n, pow16(Succ(k))) = true
+  ): Nat::le(
+    List::length(Hex::digits(Succ(f), n, acc)),
+    Nat::add(List::length(acc), Succ(k))
+  ) = true {
+    ⊢ Nat::le(
+      List::length(Hex::digits(Succ(f), n, acc)),
+      Nat::add(List::length(acc), Succ(k))
+    ) = true from match f {
+      Zero => Hex::len_zero(Nat::eq(Nat::div_nz(n, 16, Nat::succ_ne_zero(15)), 0), n, acc, k)
+      Succ(g) => Hex::len_step(
+        Nat::eq(Nat::div_nz(n, 16, Nat::succ_ne_zero(15)), 0),
+        g,
+        n,
+        acc,
+        k,
+        Refl,
+        h,
+        (m: Nat, a: List(Nat), j: Nat, hm: Nat::lt(m, pow16(Succ(j))) = true) => Hex::len_digits(
+          g,
+          m,
+          a,
+          j,
+          hm
+        )
+      )
+    }
+  }
+
+  pub theorem text_len(
+    n: Nat,
+    k: Nat,
+    h: Nat::lt(n, pow16(Succ(k))) = true
+  ): Nat::le(List::length(hex_text(n)), Succ(k)) = true {
+    Eq::trans(
+      Eq::congr(⟦Nat::le(List::length(hex_text(n)), □)⟧, Eq::sym(Nat::add_zero_left(Succ(k)))),
+      Hex::len_digits(n, n, Nil, k, h)
+    )
+  }
+}
+
+pub fn any_after(any: Bool, ds: List(Nat)): Bool {
+  match ds {
+    Nil => any
+    Cons(b, t) => true
+  }
+}
+
+pub theorem size_digit(
+  line: Nat,
+  o: Option(Nat),
+  b: Nat,
+  t: List(Nat),
+  ys: List(Nat),
+  n: Nat,
+  any: Bool,
+  c: Nat,
+  ok: Bool::and(is_some_nat(o), Hex::all(t)) = true,
+  ih: (m: Nat) -> Chunks::feed(
+    line,
+    ChunkSize(m, true, Nat::add(c, List::length(t))),
+    List::append(t, ys)
+  ) = Chunks::feed(line, ChunkSize(Hex::fold(m, t), any_after(true, t), c), ys)
+): feed_pick(
+  took(size_byte(o, any, b, n, Nat::add(c, List::length(t)))),
+  ChunkSize(n, any, Nat::add(c, List::length(Cons(b, t)))),
+  Cons(b, List::append(t, ys)),
+  (s2: Chunks) => Chunks::feed(line, s2, List::append(t, ys))
+) = Chunks::feed(line, ChunkSize(Hex::pick(o, n, (m: Nat) => Hex::fold(m, t)), true, c), ys) {
+  ⊢ feed_pick(
+    took(size_byte(o, any, b, n, Nat::add(c, List::length(t)))),
+    ChunkSize(n, any, Nat::add(c, List::length(Cons(b, t)))),
+    Cons(b, List::append(t, ys)),
+    (s2: Chunks) => Chunks::feed(line, s2, List::append(t, ys))
+  ) = Chunks::feed(
+    line,
+    ChunkSize(Hex::pick(o, n, (m: Nat) => Hex::fold(m, t)), true, c),
+    ys
+  ) from match o {
+    None => False::elim(false_ne_true(ok))
+    Some(d) => Eq::trans(
+      fed_prepend_nil(
+        Chunks::feed(
+          line,
+          ChunkSize(Nat::add(Nat::mul(n, 16), d), true, Nat::add(c, List::length(t))),
+          List::append(t, ys)
+        )
+      ),
+      Eq::trans(
+        ih(Nat::add(Nat::mul(n, 16), d)),
+        Eq::congr(
+          ⟦Chunks::feed(line, ChunkSize(Hex::fold(Nat::add(Nat::mul(n, 16), d), t), □, c), ys)⟧,
+          any_after_yes(t)
+        )
+      )
+    )
+  }
+}
+
+pub theorem any_after_yes(t: List(Nat)): any_after(true, t) = true {
+  match t {
+    Nil => Refl
+    Cons(b, u) => Refl
+  }
+}
+
+// The hex digits of a size line add up, one room each.
+pub theorem size_digits(
+  line: Nat,
+  ds: List(Nat),
+  ys: List(Nat),
+  n: Nat,
+  any: Bool,
+  c: Nat,
+  ok: Hex::all(ds) = true
+): Chunks::feed(
+  line,
+  ChunkSize(n, any, Nat::add(c, List::length(ds))),
+  List::append(ds, ys)
+) = Chunks::feed(line, ChunkSize(Hex::fold(n, ds), any_after(any, ds), c), ys) {
+  ⊢ Chunks::feed(
+    line,
+    ChunkSize(n, any, Nat::add(c, List::length(ds))),
+    List::append(ds, ys)
+  ) = Chunks::feed(line, ChunkSize(Hex::fold(n, ds), any_after(any, ds), c), ys) from match ds {
+    Nil => Refl
+    Cons(b, t) => size_digit(
+      line,
+      hex_of(b),
+      b,
+      t,
+      ys,
+      n,
+      any,
+      c,
+      ok,
+      (m: Nat) => Eq::trans(
+        size_digits(line, t, ys, m, true, c, yes_right(is_some_nat(hex_of(b)), Hex::all(t), ok)),
+        Refl
+      )
+    )
+  }
+}
+
+// The CR and LF after a nonzero size start the data.
+pub theorem size_line_end(
+  line: Nat,
+  k: Nat,
+  c: Nat,
+  ys: List(Nat)
+): Chunks::feed(
+  line,
+  ChunkSize(Succ(k), true, Succ(c)),
+  Cons(13, Cons(10, ys))
+) = Chunks::feed(line, ChunkData(Succ(k)), ys) {
+  Eq::trans(
+    fed_prepend_nil(fed_prepend(Nil, Chunks::feed(line, ChunkData(Succ(k)), ys))),
+    fed_prepend_nil(Chunks::feed(line, ChunkData(Succ(k)), ys))
+  )
+}
+
+// `b - a` when `a` is at most `b`.
+pub fn room_left(a: Nat, b: Nat): Option(Nat) {
+  match a {
+    Zero => Some(b)
+    Succ(a2) => ⊢ Option(Nat) from match b {
+      Zero => None
+      Succ(b2) => room_left(a2, b2)
+    }
+  }
+}
+
+pub fn nat_or_zero(o: Option(Nat)): Nat {
+  match o {
+    None => Zero
+    Some(x) => x
+  }
+}
+
+pub theorem room_left_add(
+  a: Nat,
+  b: Nat,
+  c: Nat,
+  e: room_left(a, b) = Some(c)
+): Nat::add(c, a) = b {
+  match a {
+    Zero => Eq::sym(Eq::congr(nat_or_zero, e))
+    Succ(a2) => ⊢ Nat::add(c, Succ(a2)) = b from match b {
+      Zero => False::elim(false_ne_true(Eq::congr(is_some_nat, e)))
+      Succ(b2) => Eq::congr(Succ, room_left_add(a2, b2, c, e))
+    }
+  }
+}
+
+// A chunked body reads back as the data of its chunks, and the reader stops
+// right after it: what follows is the next message's. `line` must leave room
+// for the last chunk's size line, `0` and its CR.
+pub theorem chunked_read(
+  line: Nat,
+  c0: Nat,
+  items: List(@size List(Nat) × @data List(Nat)),
+  ys: List(Nat),
+  room: line = Succ(Succ(c0)),
+  ok: Chunks::ok(line, items) = true
+): Chunks::feed(
+  line,
+  Chunks::start(line),
+  List::append(Chunks::wire(items), ys)
+) = Fed::Mk(ChunksDone, Chunks::data(items), ys) {
+  ⊢ Chunks::feed(
+    line,
+    Chunks::start(line),
+    List::append(Chunks::wire(items), ys)
+  ) = Fed::Mk(ChunksDone, Chunks::data(items), ys) from match items {
+    Nil => Eq::trans(
+      Eq::congr(
+        (r: Nat) => Chunks::feed(
+          r,
+          Chunks::start(r),
+          Cons(48, Cons(13, Cons(10, Cons(13, Cons(10, ys)))))
+        ),
+        room
+      ),
+      Chunks::last(c0, ys)
+    )
+    Cons(p, t) => Eq::trans(
+      Eq::congr(
+        ⟦Chunks::feed(line, Chunks::start(line), □)⟧,
+        List::append_assoc(Chunk::wire(chunk_size(p), chunk_data(p)), Chunks::wire(t), ys)
+      ),
+      Eq::trans(
+        Chunk::ok_read(
+          line,
+          chunk_size(p),
+          chunk_data(p),
+          room_left(Succ(List::length(chunk_size(p))), line),
+          Refl,
+          Chunk::ok_pair(line, p, yes_left(Chunk::ok(line, p), Chunks::ok(line, t), ok)),
+          List::append(Chunks::wire(t), ys)
+        ),
+        Eq::congr(
+          ⟦fed_prepend(chunk_data(p), □)⟧,
+          chunked_read(
+            line,
+            c0,
+            t,
+            ys,
+            room,
+            yes_right(Chunk::ok(line, p), Chunks::ok(line, t), ok)
+          )
+        )
+      )
+    )
+  }
+}
+
+pub fn hex_digit(d: Nat): Nat {
+  match Nat::lt(d, 10) {
+    true => Nat::add(d, 48)
+    false => Nat::add(d, 87)
+  }
+}
+
+// `n` in lower-case hex digits.
+pub fn hex_text(n: Nat): List(Nat) {
+  Hex::digits(Succ(n), n, Nil)
+}
+
+// The pieces as a chunked body, with the last chunk and no trailers.
+pub fn chunked_bytes(pieces: List(List(Nat))): List(Nat) {
+  Chunks::wire(Chunk::items(pieces))
+}
+
+pub fn last_chunk_bytes(): List(Nat) {
+  Chunks::wire(Nil)
+}
+
+pub theorem example_chunked_bytes(): chunked_bytes(
+  [Text::bytes("Wiki"), Nil, Text::bytes("pedia in\r\n\r\nchunks.")]
+) = Text::bytes("4\r\nWiki\r\n13\r\npedia in\r\n\r\nchunks.\r\n0\r\n\r\n") {
+  Refl
+}
+
+pub theorem example_chunks_ok(): Chunks::ok(
+  8,
+  Chunk::items([Text::bytes("Wiki"), Nil, Text::bytes("pedia in\r\n\r\nchunks.")])
+) = true {
+  Refl
+}
+
+// ---- the hex writer and the chunked reader agree -------------------------------------
+
+// `o` is `Some(d)`.
+pub fn some_is(o: Option(Nat), d: Nat): Bool {
+  match o {
+    None => false
+    Some(e) => Nat::eq(e, d)
+  }
+}
+
+pub theorem some_is_sound(o: Option(Nat), d: Nat, h: some_is(o, d) = true): o = Some(d) {
+  match o {
+    None => False::elim(false_ne_true(h))
+    Some(e) => Eq::congr(⟦Some(□)⟧, Nat::eq_sound(e, d, h))
+  }
+}
+
+pub theorem le_add_left(x: Nat, y: Nat): Nat::le(x, Nat::add(y, x)) = true {
+  match x {
+    Zero => Refl
+    Succ(k) => le_add_left(k, y)
+  }
+}
+
+pub theorem le_add_right(x: Nat, y: Nat): Nat::le(x, Nat::add(x, y)) = true {
+  match y {
+    Zero => Nat::le_refl(x)
+    Succ(k) => Nat::le_trans(
+      x,
+      Nat::add(x, k),
+      Succ(Nat::add(x, k)),
+      le_add_right(x, k),
+      Nat::le_succ(Nat::add(x, k))
+    )
+  }
+}
+
+pub theorem le_times_16(q: Nat): Nat::le(q, Nat::mul(16, q)) = true {
+  Eq::trans(Eq::congr(⟦Nat::le(q, □)⟧, Nat::mul_succ_left(15, q)), le_add_left(q, Nat::mul(15, q)))
+}
+
+// A positive quotient by 16 is below what is divided.
+pub theorem below_times_16(
+  q: Nat,
+  r: Nat,
+  e: Nat::eq(q, 0) = false
+): Nat::lt(q, Nat::add(Nat::mul(16, q), r)) = true {
+  match q {
+    Zero => False::elim(true_ne_false(e))
+    Succ(q2) => Nat::le_trans(
+      Succ(Succ(q2)),
+      Nat::mul(16, Succ(q2)),
+      Nat::add(Nat::mul(16, Succ(q2)), r),
+      Nat::le_trans(
+        q2,
+        Nat::mul(16, q2),
+        Nat::add(Nat::mul(16, q2), 14),
+        le_times_16(q2),
+        le_add_right(Nat::mul(16, q2), 14)
+      ),
+      le_add_right(Nat::mul(16, Succ(q2)), r)
+    )
+  }
+}
+
+pub theorem div_16_below(
+  n: Nat,
+  e: Nat::eq(Nat::div_nz(n, 16, Nat::succ_ne_zero(15)), 0) = false
+): Nat::lt(Nat::div_nz(n, 16, Nat::succ_ne_zero(15)), n) = true {
+  Eq::trans(
+    Eq::congr(
+      ⟦Nat::lt(Nat::div_nz(n, 16, Nat::succ_ne_zero(15)), □)⟧,
+      Eq::sym(Nat::div_mod_eq(n, 16, Nat::succ_ne_zero(15)))
+    ),
+    below_times_16(
+      Nat::div_nz(n, 16, Nat::succ_ne_zero(15)),
+      Nat::rem_nz(n, 16, Nat::succ_ne_zero(15)),
+      e
+    )
+  )
+}
+
+pub theorem div_16_fuel(
+  n: Nat,
+  g: Nat,
+  e: Nat::eq(Nat::div_nz(n, 16, Nat::succ_ne_zero(15)), 0) = false,
+  h: Nat::lt(n, Succ(Succ(g))) = true
+): Nat::lt(Nat::div_nz(n, 16, Nat::succ_ne_zero(15)), Succ(g)) = true {
+  Nat::le_trans(Succ(Nat::div_nz(n, 16, Nat::succ_ne_zero(15))), n, Succ(g), div_16_below(n, e), h)
+}
+
+// The size line of a nonempty piece fits `line`.
+pub fn size_line_fits(line: Nat, d: List(Nat)): Bool {
+  match d {
+    Nil => true
+    Cons(b, t) => is_some_nat(room_left(Succ(List::length(hex_text(List::length(d)))), line))
+  }
+}
+
+pub fn size_lines_fit(line: Nat, pieces: List(List(Nat))): Bool {
+  match pieces {
+    Nil => true
+    Cons(d, t) => size_line_fits(line, d) && size_lines_fit(line, t)
+  }
+}
+
+// A body the writer makes in chunks reads back as its pieces joined, and the
+// reader stops right after it: whatever follows is left for the next message.
+pub theorem chunked_bytes_read(
+  line: Nat,
+  c0: Nat,
+  pieces: List(List(Nat)),
+  ys: List(Nat),
+  room: line = Succ(Succ(c0)),
+  fits: size_lines_fit(line, pieces) = true
+): Chunks::feed(
+  line,
+  Chunks::start(line),
+  List::append(chunked_bytes(pieces), ys)
+) = Fed::Mk(ChunksDone, List::concat(pieces), ys) {
+  Eq::trans(
+    chunked_read(line, c0, Chunk::items(pieces), ys, room, Chunk::items_ok(line, pieces, fits)),
+    Eq::congr(⟦Fed::Mk(ChunksDone, □, ys)⟧, Chunk::items_data(pieces))
+  )
+}
+
+pub theorem example_size_lines_fit(): size_lines_fit(
+  8,
+  [Text::bytes("Wiki"), Nil, Text::bytes("pedia in\r\n\r\nchunks.")]
+) = true {
+  Refl
+}
+
+// ---- how long the size line is ---------------------------------------------------------
+
+pub fn pow16(k: Nat): Nat {
+  match k {
+    Zero => 1
+    Succ(j) => Nat::mul(16, pow16(j))
+  }
+}
+
+pub theorem lt_irrefl(n: Nat): Nat::lt(n, n) = false {
+  match n {
+    Zero => Refl
+    Succ(k) => lt_irrefl(k)
+  }
+}
+
+pub theorem not_lt_le(a: Nat, b: Nat, e: Nat::lt(a, b) = false): Nat::le(b, a) = true {
+  match a {
+    Zero => ⊢ Nat::le(b, Zero) = true from match b {
+      Zero => Refl
+      Succ(b2) => False::elim(true_ne_false(e))
+    }
+    Succ(a2) => ⊢ Nat::le(b, Succ(a2)) = true from match b {
+      Zero => Refl
+      Succ(b2) => not_lt_le(a2, b2, e)
+    }
+  }
+}
+
+pub theorem le_add_mono_left(
+  x: Nat,
+  y: Nat,
+  u: Nat,
+  h: Nat::le(x, y) = true
+): Nat::le(Nat::add(x, u), Nat::add(y, u)) = true {
+  match u {
+    Zero => h
+    Succ(k) => le_add_mono_left(x, y, k, h)
+  }
+}
+
+pub theorem le_add_mono_right(
+  y: Nat,
+  u: Nat,
+  v: Nat,
+  h: Nat::le(u, v) = true
+): Nat::le(Nat::add(y, u), Nat::add(y, v)) = true {
+  match u {
+    Zero => le_add_right(y, v)
+    Succ(u2) => ⊢ Nat::le(Nat::add(y, Succ(u2)), Nat::add(y, v)) = true from match v {
+      Zero => False::elim(false_ne_true(Eq::trans(Eq::sym(Nat::lt_zero_false(u2)), h)))
+      Succ(v2) => le_add_mono_right(y, u2, v2, h)
+    }
+  }
+}
+
+pub theorem le_mul_mono(
+  c: Nat,
+  a: Nat,
+  b: Nat,
+  h: Nat::le(a, b) = true
+): Nat::le(Nat::mul(c, a), Nat::mul(c, b)) = true {
+  match c {
+    Zero => Eq::congr(⟦Nat::le(□, Nat::mul(Zero, b))⟧, Nat::mul_zero_left(a))
+    Succ(c2) => Eq::trans(
+      Eq::congr(⟦Nat::le(□, Nat::mul(Succ(c2), b))⟧, Nat::mul_succ_left(c2, a)),
+      Eq::trans(
+        Eq::congr(⟦Nat::le(Nat::add(Nat::mul(c2, a), a), □)⟧, Nat::mul_succ_left(c2, b)),
+        Nat::le_trans(
+          Nat::add(Nat::mul(c2, a), a),
+          Nat::add(Nat::mul(c2, b), a),
+          Nat::add(Nat::mul(c2, b), b),
+          le_add_mono_left(Nat::mul(c2, a), Nat::mul(c2, b), a, le_mul_mono(c2, a, b, h)),
+          le_add_mono_right(Nat::mul(c2, b), a, b, h)
+        )
+      )
+    )
+  }
+}
+
+pub theorem div_16_le(n: Nat): Nat::le(
+  Nat::mul(16, Nat::div_nz(n, 16, Nat::succ_ne_zero(15))),
+  n
+) = true {
+  Eq::trans(
+    Eq::congr(
+      ⟦Nat::le(Nat::mul(16, Nat::div_nz(n, 16, Nat::succ_ne_zero(15))), □)⟧,
+      Eq::sym(Nat::div_mod_eq(n, 16, Nat::succ_ne_zero(15)))
+    ),
+    le_add_right(
+      Nat::mul(16, Nat::div_nz(n, 16, Nat::succ_ne_zero(15))),
+      Nat::rem_nz(n, 16, Nat::succ_ne_zero(15))
+    )
+  )
+}
+
+pub theorem div_below_with(
+  y: Bool,
+  n: Nat,
+  p: Nat,
+  e: Nat::lt(Nat::div_nz(n, 16, Nat::succ_ne_zero(15)), p) = y,
+  h: Nat::lt(n, Nat::mul(16, p)) = true
+): y = true {
+  match y {
+    true => Refl
+    false => False::elim(
+      false_ne_true(
+        Eq::trans(
+          Eq::sym(lt_irrefl(n)),
+          Nat::le_trans(
+            Succ(n),
+            Nat::mul(16, p),
+            n,
+            h,
+            Nat::le_trans(
+              Nat::mul(16, p),
+              Nat::mul(16, Nat::div_nz(n, 16, Nat::succ_ne_zero(15))),
+              n,
+              le_mul_mono(
+                16,
+                p,
+                Nat::div_nz(n, 16, Nat::succ_ne_zero(15)),
+                not_lt_le(Nat::div_nz(n, 16, Nat::succ_ne_zero(15)), p, e)
+              ),
+              div_16_le(n)
+            )
+          )
+        )
+      )
+    )
+  }
+}
+
+// Below `16 * p`, the quotient by 16 is below `p`.
+pub theorem div_16_below_of(
+  n: Nat,
+  p: Nat,
+  h: Nat::lt(n, Nat::mul(16, p)) = true
+): Nat::lt(Nat::div_nz(n, 16, Nat::succ_ne_zero(15)), p) = true {
+  div_below_with(Nat::lt(Nat::div_nz(n, 16, Nat::succ_ne_zero(15)), p), n, p, Refl, h)
+}
+
+pub theorem div_16_small(
+  n: Nat,
+  h: Nat::lt(n, 16) = true
+): Nat::eq(Nat::div_nz(n, 16, Nat::succ_ne_zero(15)), 0) = true {
+  Eq::trans(
+    Eq::congr(
+      ⟦Nat::eq(□, 0)⟧,
+      Eq::trans(
+        Eq::congr(⟦Nat::div_nz(□, 16, Nat::succ_ne_zero(15))⟧, Eq::sym(Nat::add_zero_left(n))),
+        Nat::div_of(Zero, n, 15, h)
+      )
+    ),
+    Refl
+  )
+}
+
+pub theorem room_left_le(
+  a: Nat,
+  b: Nat,
+  h: Nat::le(a, b) = true
+): is_some_nat(room_left(a, b)) = true {
+  match a {
+    Zero => Refl
+    Succ(a2) => ⊢ is_some_nat(room_left(Succ(a2), b)) = true from match b {
+      Zero => False::elim(false_ne_true(Eq::trans(Eq::sym(Nat::lt_zero_false(a2)), h)))
+      Succ(b2) => room_left_le(a2, b2, h)
+    }
+  }
+}
+
+// Every piece is shorter than `p` bytes.
+pub fn pieces_below(p: Nat, pieces: List(List(Nat))): Bool {
+  match pieces {
+    Nil => true
+    Cons(d, t) => Nat::lt(List::length(d), p) && pieces_below(p, t)
+  }
+}
+
+pub theorem size_lines_fit_below(
+  c0: Nat,
+  pieces: List(List(Nat)),
+  h: pieces_below(pow16(Succ(c0)), pieces) = true
+): size_lines_fit(Succ(Succ(c0)), pieces) = true {
+  match pieces {
+    Nil => Refl
+    Cons(d, t) => ⊢ size_lines_fit(Succ(Succ(c0)), Cons(d, t)) = true from match d {
+      Nil => size_lines_fit_below(
+        c0,
+        t,
+        yes_right(
+          Nat::lt(List::length(Nil(<A: Nat>)), pow16(Succ(c0))),
+          pieces_below(pow16(Succ(c0)), t),
+          h
+        )
+      )
+      Cons(b, u) => Bool::and_intro(
+        size_line_fits(Succ(Succ(c0)), Cons(b, u)),
+        size_lines_fit(Succ(Succ(c0)), t),
+        room_left_le(
+          Succ(List::length(hex_text(List::length(Cons(b, u))))),
+          Succ(Succ(c0)),
+          Hex::text_len(
+            List::length(Cons(b, u)),
+            c0,
+            yes_left(
+              Nat::lt(List::length(Cons(b, u)), pow16(Succ(c0))),
+              pieces_below(pow16(Succ(c0)), t),
+              h
+            )
+          )
+        ),
+        size_lines_fit_below(
+          c0,
+          t,
+          yes_right(
+            Nat::lt(List::length(Cons(b, u)), pow16(Succ(c0))),
+            pieces_below(pow16(Succ(c0)), t),
+            h
+          )
+        )
+      )
+    }
+  }
+}
+
+// With size lines of `c0 + 2` bytes, any body whose pieces are each shorter
+// than `16^(c0+1)` bytes reads back whole.
+pub theorem chunked_bytes_read_below(
+  c0: Nat,
+  pieces: List(List(Nat)),
+  ys: List(Nat),
+  below: pieces_below(pow16(Succ(c0)), pieces) = true
+): Chunks::feed(
+  Succ(Succ(c0)),
+  Chunks::start(Succ(Succ(c0))),
+  List::append(chunked_bytes(pieces), ys)
+) = Fed::Mk(ChunksDone, List::concat(pieces), ys) {
+  chunked_bytes_read(Succ(Succ(c0)), c0, pieces, ys, Refl, size_lines_fit_below(c0, pieces, below))
+}
+
+// ---- reading a printed response -----------------------------------------------------
+
+pub theorem status_line_not_blank_rev(s: Status): is_blank(
+  List::reverse_onto(status_line_bytes(s), Nil)
+) = false {
+  blank_split(
+    Nil,
+    72,
+    Nil,
+    84,
+    List::append(
+      Text::bytes("TP/1.1 "),
+      List::append(status_digits(s), Cons(32, List::append(Text::bytes(reason(s)), Cons(13, Nil))))
+    ),
+    Nil
+  )
+}
+
+pub theorem sent_headers_ok(
+  hs: List(@name Text × @value Text),
+  b: Text,
+  ok: headers_ok(hs) = true
+): headers_ok(sent_headers(hs, b)) = true {
+  headers_ok_append(
+    without_framing(hs),
+    Cons(content_length(b), Nil),
+    without_framing_ok(hs, ok),
+    Bool::and_intro(Header::ok(content_length(b)), true, content_length_ok(b), Refl)
+  )
+}
+
+// The head's lines read back as the response as it went out, without its body.
+pub theorem parse_response_head(
+  r: HttpResponse,
+  ok: HttpResponse::ok(r) = true
+): parse_response_lines(
+  HttpResponse::head_lines(r)
+) = Some(
+  HttpResponse::Mk(
+    HttpResponse::status(r),
+    sent_headers(HttpResponse::headers(r), HttpResponse::body(r)),
+    Text::Mk(Nil)
+  )
+) {
+  ⊢ parse_response_lines(
+    HttpResponse::head_lines(r)
+  ) = Some(
+    HttpResponse::Mk(
+      HttpResponse::status(r),
+      sent_headers(HttpResponse::headers(r), HttpResponse::body(r)),
+      Text::Mk(Nil)
+    )
+  ) from match r {
+    Mk(s, hs, b) => Eq::trans(
+      Eq::congr(
+        ⟦build_response(□, parse_headers(lines(Head::lines(sent_headers(hs, b), Nil))))⟧,
+        parse_status_line(s, yes_left(status_ok(s), headers_ok(hs), ok))
+      ),
+      Eq::congr(
+        ⟦build_response(Some(s), □)⟧,
+        parse_head_lines(
+          sent_headers(hs, b),
+          Nil,
+          sent_headers_ok(hs, b, yes_right(status_ok(s), headers_ok(hs), ok))
+        )
+      )
+    )
+  }
+}
+
+// ---- the decimal Content-Length reads back -------------------------------------------
+
+pub theorem le_times_10(q: Nat): Nat::le(q, Nat::mul(10, q)) = true {
+  Eq::trans(Eq::congr(⟦Nat::le(q, □)⟧, Nat::mul_succ_left(9, q)), le_add_left(q, Nat::mul(9, q)))
+}
+
+pub theorem below_times_10(
+  q: Nat,
+  r: Nat,
+  e: Nat::eq(q, 0) = false
+): Nat::lt(q, Nat::add(Nat::mul(10, q), r)) = true {
+  match q {
+    Zero => False::elim(true_ne_false(e))
+    Succ(q2) => Nat::le_trans(
+      Succ(Succ(q2)),
+      Nat::mul(10, Succ(q2)),
+      Nat::add(Nat::mul(10, Succ(q2)), r),
+      Nat::le_trans(
+        q2,
+        Nat::mul(10, q2),
+        Nat::add(Nat::mul(10, q2), 8),
+        le_times_10(q2),
+        le_add_right(Nat::mul(10, q2), 8)
+      ),
+      le_add_right(Nat::mul(10, Succ(q2)), r)
+    )
+  }
+}
+
+pub theorem div_10_fuel(
+  n: Nat,
+  g: Nat,
+  e: Nat::eq(Nat::div_nz(n, 10, Nat::succ_ne_zero(9)), 0) = false,
+  h: Nat::lt(n, Succ(Succ(g))) = true
+): Nat::lt(Nat::div_nz(n, 10, Nat::succ_ne_zero(9)), Succ(g)) = true {
+  Nat::le_trans(
+    Succ(Nat::div_nz(n, 10, Nat::succ_ne_zero(9))),
+    n,
+    Succ(g),
+    Eq::trans(
+      Eq::congr(
+        ⟦Nat::lt(Nat::div_nz(n, 10, Nat::succ_ne_zero(9)), □)⟧,
+        Eq::sym(Nat::div_mod_eq(n, 10, Nat::succ_ne_zero(9)))
+      ),
+      below_times_10(
+        Nat::div_nz(n, 10, Nat::succ_ne_zero(9)),
+        Nat::rem_nz(n, 10, Nat::succ_ne_zero(9)),
+        e
+      )
+    ),
+    h
+  )
+}
+
+pub fn dec_step(y: Bool, f: Nat, n: Nat, acc: List(Nat)): List(Nat) {
+  match y {
+    true => Cons(Nat::add(Nat::rem_nz(n, 10, Nat::succ_ne_zero(9)), 48), acc)
+    false => Nat::digits(
+      f,
+      Nat::div_nz(n, 10, Nat::succ_ne_zero(9)),
+      Cons(Nat::add(Nat::rem_nz(n, 10, Nat::succ_ne_zero(9)), 48), acc)
+    )
+  }
+}
+
+pub theorem nat_digits_step(
+  f: Nat,
+  n: Nat,
+  acc: List(Nat)
+): Nat::digits(
+  Succ(f),
+  n,
+  acc
+) = dec_step(Nat::eq(Nat::div_nz(n, 10, Nat::succ_ne_zero(9)), 0), f, n, acc) {
+  Refl
+}
+
+// The low digit, read after `m`.
+pub theorem dec_low(
+  m: Nat,
+  n: Nat,
+  acc: List(Nat)
+): digits_on(
+  m,
+  Cons(Nat::add(Nat::rem_nz(n, 10, Nat::succ_ne_zero(9)), 48), acc)
+) = digits_on(Nat::add(Nat::mul(m, 10), Nat::rem_nz(n, 10, Nat::succ_ne_zero(9))), acc) {
+  Eq::congr(
+    (o: Option(Nat)) => ⊢ Option(Nat) from match o {
+      None => None
+      Some(d) => digits_on(Nat::add(Nat::mul(m, 10), d), acc)
+    },
+    digit_of_digit(Nat::rem_nz(n, 10, Nat::succ_ne_zero(9)), Nat::mod_succ_lt(n, 9))
+  )
+}
+
+pub theorem dec_small(
+  n: Nat,
+  e: Nat::eq(Nat::div_nz(n, 10, Nat::succ_ne_zero(9)), 0) = true
+): Nat::add(Nat::mul(Zero, 10), Nat::rem_nz(n, 10, Nat::succ_ne_zero(9))) = n {
+  Eq::trans(
+    Eq::congr(
+      ⟦Nat::add(Nat::mul(10, □), Nat::rem_nz(n, 10, Nat::succ_ne_zero(9)))⟧,
+      Eq::sym(Nat::eq_sound(Nat::div_nz(n, 10, Nat::succ_ne_zero(9)), 0, e))
+    ),
+    Nat::div_mod_eq(n, 10, Nat::succ_ne_zero(9))
+  )
+}
+
+pub theorem dec_back(n: Nat): Nat::add(
+  Nat::mul(Nat::div_nz(n, 10, Nat::succ_ne_zero(9)), 10),
+  Nat::rem_nz(n, 10, Nat::succ_ne_zero(9))
+) = n {
+  Eq::trans(
+    Eq::congr(
+      ⟦Nat::add(□, Nat::rem_nz(n, 10, Nat::succ_ne_zero(9)))⟧,
+      Nat::mul_comm(Nat::div_nz(n, 10, Nat::succ_ne_zero(9)), 10)
+    ),
+    Nat::div_mod_eq(n, 10, Nat::succ_ne_zero(9))
+  )
+}
+
+pub theorem dec_one(
+  n: Nat,
+  acc: List(Nat),
+  h: Nat::lt(n, Succ(Zero)) = true
+): decimal(Nat::digits(Succ(Zero), n, acc)) = digits_on(n, acc) {
+  match n {
+    Zero => Refl
+    Succ(m) => False::elim(false_ne_true(Eq::trans(Eq::sym(Nat::lt_zero_false(m)), h)))
+  }
+}
+
+pub theorem dec_digits_step(
+  y: Bool,
+  g: Nat,
+  n: Nat,
+  acc: List(Nat),
+  e: Nat::eq(Nat::div_nz(n, 10, Nat::succ_ne_zero(9)), 0) = y,
+  h: Nat::lt(n, Succ(Succ(g))) = true,
+  ih: (
+    m: Nat,
+    a: List(Nat),
+    hm: Nat::lt(m, Succ(g)) = true
+  ) -> decimal(Nat::digits(Succ(g), m, a)) = digits_on(m, a)
+): decimal(dec_step(y, Succ(g), n, acc)) = digits_on(n, acc) {
+  match y {
+    true => Eq::trans(dec_low(Zero, n, acc), Eq::congr(⟦digits_on(□, acc)⟧, dec_small(n, e)))
+    false => Eq::trans(
+      ih(
+        Nat::div_nz(n, 10, Nat::succ_ne_zero(9)),
+        Cons(Nat::add(Nat::rem_nz(n, 10, Nat::succ_ne_zero(9)), 48), acc),
+        div_10_fuel(n, g, e, h)
+      ),
+      Eq::trans(
+        dec_low(Nat::div_nz(n, 10, Nat::succ_ne_zero(9)), n, acc),
+        Eq::congr(⟦digits_on(□, acc)⟧, dec_back(n))
+      )
+    )
+  }
+}
+
+// With enough fuel, the decimal digits of `n` before `acc` read on as `n`.
+pub theorem dec_digits(
+  f: Nat,
+  n: Nat,
+  acc: List(Nat),
+  h: Nat::lt(n, Succ(f)) = true
+): decimal(Nat::digits(Succ(f), n, acc)) = digits_on(n, acc) {
+  match f {
+    Zero => dec_one(n, acc, h)
+    Succ(g) => Eq::trans(
+      Eq::congr(⟦decimal(□)⟧, nat_digits_step(Succ(g), n, acc)),
+      dec_digits_step(
+        Nat::eq(Nat::div_nz(n, 10, Nat::succ_ne_zero(9)), 0),
+        g,
+        n,
+        acc,
+        Refl,
+        h,
+        (m: Nat, a: List(Nat), hm: Nat::lt(m, Succ(g)) = true) => dec_digits(g, m, a, hm)
+      )
+    )
+  }
+}
+
+// `Text::of_nat` writes what `decimal` reads.
+pub theorem decimal_text_of_nat(n: Nat): decimal(Text::bytes(Text::of_nat(n))) = Some(n) {
+  dec_digits(n, n, Nil, Nat::lt_succ_self(n))
+}
+
+// ---- the body of a response as it goes out -------------------------------------------
+
+// One header's value, if it is the one named, before `x`.
+pub fn named_before(y: Bool, v: List(Nat), x: List(List(Nat))): List(List(Nat)) {
+  match y {
+    true => Cons(v, x)
+    false => x
+  }
+}
+
+pub theorem named_before_append(
+  y: Bool,
+  v: List(Nat),
+  x: List(List(Nat)),
+  p: List(List(Nat)),
+  q: List(List(Nat)),
+  e: x = List::append(p, q)
+): named_before(y, v, x) = List::append(named_before(y, v, p), q) {
+  match y {
+    true => Eq::congr(⟦Cons(v, □)⟧, e)
+    false => e
+  }
+}
+
+// `Header::named` of `content-length` is `is_content_length`.
+pub theorem named_content_length(h: @name Text × @value Text): Header::named(
+  content_length_name(),
+  h
+) = is_content_length(h) {
+  text_eq_ci_at_eq((h: @name Text), Zero, content_length_name())
+}
+
+// `Header::named` of `transfer-encoding` is `is_transfer_encoding`.
+pub theorem named_transfer_encoding(h: @name Text × @value Text): Header::named(
+  transfer_encoding_name(),
+  h
+) = is_transfer_encoding(h) {
+  text_eq_ci_at_eq((h: @name Text), Zero, transfer_encoding_name())
+}
+
+pub fn no_values(l: List(List(Nat))): Bool {
+  match l {
+    Nil => true
+    Cons(v, t) => false
+  }
+}
+
+pub theorem named_before_nil(
+  y: Bool,
+  v: List(Nat),
+  x: List(List(Nat)),
+  e: named_before(y, v, x) = Nil
+): x = Nil {
+  match y {
+    true => False::elim(false_ne_true(Eq::congr(no_values, e)))
+    false => e
+  }
+}
+
+pub theorem named_before_false(
+  y: Bool,
+  v: List(Nat),
+  x: List(List(Nat)),
+  e: named_before(y, v, x) = Nil
+): y = false {
+  match y {
+    true => False::elim(false_ne_true(Eq::congr(no_values, e)))
+    false => Refl
+  }
+}
+
+// Dropping a header called `name`, whose value is the one named, leaves no value.
+pub theorem values_keep_unless(
+  name: List(Nat),
+  y: Bool,
+  h: @name Text × @value Text,
+  rest: List(@name Text × @value Text),
+  e: Header::named(name, h) = y,
+  r: Header::values(name, rest) = Nil
+): Header::values(name, keep_unless(y, h, rest)) = Nil {
+  match y {
+    true => r
+    false => Eq::trans(
+      Eq::congr(⟦named_before(□, Text::bytes((h: @value Text)), Header::values(name, rest))⟧, e),
+      r
+    )
+  }
+}
+
+// Dropping some headers from headers that hold no value for `name` leaves none.
+pub theorem values_keep_nil(
+  name: List(Nat),
+  y: Bool,
+  h: @name Text × @value Text,
+  rest: List(@name Text × @value Text),
+  nm: Header::named(name, h) = false,
+  r: Header::values(name, rest) = Nil
+): Header::values(name, keep_unless(y, h, rest)) = Nil {
+  match y {
+    true => r
+    false => Eq::trans(
+      Eq::congr(⟦named_before(□, Text::bytes((h: @value Text)), Header::values(name, rest))⟧, nm),
+      r
+    )
+  }
+}
+
+pub theorem values_without_content_length(
+  hs: List(@name Text × @value Text)
+): Header::values(content_length_name(), without_content_length(hs)) = Nil {
+  match hs {
+    Nil => Refl
+    Cons(h, t) => values_keep_unless(
+      content_length_name(),
+      is_content_length(h),
+      h,
+      without_content_length(t),
+      named_content_length(h),
+      values_without_content_length(t)
+    )
+  }
+}
+
+// Dropping the `content-length` headers leaves no value for a name that had none.
+pub theorem values_without_nil(
+  name: List(Nat),
+  hs: List(@name Text × @value Text),
+  nt: Header::values(name, hs) = Nil
+): Header::values(name, without_content_length(hs)) = Nil {
+  match hs {
+    Nil => Refl
+    Cons(h, t) => values_keep_nil(
+      name,
+      is_content_length(h),
+      h,
+      without_content_length(t),
+      named_before_false(
+        Header::named(name, h),
+        Text::bytes((h: @value Text)),
+        Header::values(name, t),
+        nt
+      ),
+      values_without_nil(
+        name,
+        t,
+        named_before_nil(
+          Header::named(name, h),
+          Text::bytes((h: @value Text)),
+          Header::values(name, t),
+          nt
+        )
+      )
+    )
+  }
+}
+
+// A response goes out with exactly one `content-length` value, the length of its body,
+// whatever headers it was given.
+pub theorem sent_content_length_values(
+  hs: List(@name Text × @value Text),
+  b: Text
+): Header::values(
+  content_length_name(),
+  sent_headers(hs, b)
+) = Cons(Text::bytes(Text::of_nat(Text::len(b))), Nil) {
+  Eq::trans(
+    Header::values_append(content_length_name(), without_framing(hs), Cons(content_length(b), Nil)),
+    Eq::congr(
+      ⟦List::append(□, Header::values(content_length_name(), Cons(content_length(b), Nil)))⟧,
+      values_without_content_length(without_transfer_encoding(hs))
+    )
+  )
+}
+
+// The response as it goes out says the length of its body, whatever
+// `content-length` it was given.
+pub theorem sent_length(
+  hs: List(@name Text × @value Text),
+  b: Text
+): content_length_of(sent_headers(hs, b)) = LengthIs(Text::len(b)) {
+  Eq::trans(
+    Eq::congr(⟦lengths_from(NoLength, □)⟧, sent_content_length_values(hs, b)),
+    Eq::congr(⟦length_with(NoLength, □)⟧, decimal_text_of_nat(Text::len(b)))
+  )
+}
+
+// Dropping the `transfer-encoding` headers leaves none.
+pub theorem values_without_transfer_encoding(
+  hs: List(@name Text × @value Text)
+): Header::values(transfer_encoding_name(), without_transfer_encoding(hs)) = Nil {
+  match hs {
+    Nil => Refl
+    Cons(h, t) => values_keep_unless(
+      transfer_encoding_name(),
+      is_transfer_encoding(h),
+      h,
+      without_transfer_encoding(t),
+      named_transfer_encoding(h),
+      values_without_transfer_encoding(t)
+    )
+  }
+}
+
+// A response goes out without any `transfer-encoding`, whatever headers it was given:
+// its body goes out by its length.
+pub theorem sent_transfer_encoding_values(
+  hs: List(@name Text × @value Text),
+  b: Text
+): Header::values(transfer_encoding_name(), sent_headers(hs, b)) = Nil {
+  Eq::trans(
+    Header::values_append(
+      transfer_encoding_name(),
+      without_framing(hs),
+      Cons(content_length(b), Nil)
+    ),
+    Eq::congr(
+      ⟦List::append(□, Header::values(transfer_encoding_name(), Cons(content_length(b), Nil)))⟧,
+      values_without_nil(
+        transfer_encoding_name(),
+        without_transfer_encoding(hs),
+        values_without_transfer_encoding(hs)
+      )
+    )
+  )
+}
+
+// The response as it goes out has no Transfer-Encoding, whatever it was given.
+pub theorem sent_coding(
+  hs: List(@name Text × @value Text),
+  b: Text
+): coding_of(sent_headers(hs, b)) = NoCoding {
+  Eq::congr(⟦coding_of_values(□)⟧, sent_transfer_encoding_values(hs, b))
+}
+
+pub theorem example_response_framing_sent(): HttpResponse::framing(
+  Get,
+  200,
+  sent_headers([#(@name "content-type", @value "text/plain")], "hello")
+) = Sized(5) {
+  Refl
+}

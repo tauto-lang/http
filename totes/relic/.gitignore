@@ -1,0 +1,17 @@
+*
+!*/
+!.gitignore
+
+!/Tauto.eure
+!/README.md
+
+!/examples/*.taut
+!/server/*.eure
+!/server/src/*.taut
+!/src/*.taut
+!/src/.tauto-syntax/*.tables
+!/tests/*.eure
+!/tests/src/*.taut
+
+# Generated output and local state.
+target/

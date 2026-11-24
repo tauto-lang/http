@@ -1,0 +1,9 @@
+*
+!*/
+!.gitignore
+
+!/Tauto.eure
+!/Tauto.lock
+!/README.md
+
+!/src/*.taut

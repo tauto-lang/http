@@ -1,0 +1,431 @@
+import "../../../http/src/bytes.taut" { byte_list_eq }
+import "../../../http/src/http.taut" { HttpRequest, HttpResponse, Method, plain }
+import "../../../http/src/percent.taut" { percent_decode, percent_encode }
+import "../../../http/src/status.taut" { Status }
+import "../../../http/src/wire.taut" { parse_lines, parse_response, print_response }
+import "../../src/conn.taut" { Took, answer_took, asks_close, reading_start, take_all }
+import "../../src/response.taut" {
+  Response,
+  finish_response,
+  response_text,
+  text_response,
+  with_header
+}
+import std::base { List }
+import std::list { List }
+import std::text { Text }
+import std::text_ops { Text }
+import std::builtin::os { exit, print, stdout }
+import "../../../http/src/frame.taut" {
+  Chunk,
+  Chunks,
+  Fed,
+  Framing,
+  Head,
+  HttpRequest,
+  RequestHead,
+  chunked_bytes,
+  fed_out,
+  fed_rest,
+  fed_state,
+  feed,
+  feed_then,
+  length_step
+}
+
+// Checks run as a program: the reading of requests and the writing of responses, with
+// `todo_answer` below as a stand-in handler. The routing scenarios of the examples are in
+// `router.taut`.
+
+// A failed check performs `failed`; `main` handles it and exits with 1 at the end.
+effect failed(): Unit resume 1
+
+fn check(name: Text, ok: Bool): Unit ! {stdout, failed} {
+  match ok {
+    true => print(Text::concat_all(Cons("ok      ", Cons(name, Cons("\n", Nil)))))
+    false => {
+      print(Text::concat_all(Cons("FAILED  ", Cons(name, Cons("\n", Nil)))))
+      perform failed()
+    }
+  }
+}
+
+// Reading a message a few bytes at a time (`src/frame.taut`).
+
+fn frame_head_method(f: Fed(RequestHead)): Text {
+  match fed_state(f) {
+    HeadRead(ls) => match parse_lines(ls) {
+      Some(r) => concat(Method::text(HttpRequest::method(r)), HttpRequest::path(r))
+      None => "unparsed"
+    }
+    HeadReading(l, d, b) => "reading"
+    HeadTooLong => "too long"
+  }
+}
+
+fn frame_raw(): List(Nat) {
+  Text::bytes("GET /a?b=1 HTTP/1.1\r\nHost: example.com\r\nContent-Length: 3\r\n\r\nabcGET")
+}
+
+fn chunks_state_name(c: Chunks): Text {
+  match c {
+    ChunksDone => "done"
+    ChunksBad => "bad"
+    ChunkSize(n, a, r) => "size"
+    ChunkExt(n, r) => "ext"
+    ChunkSizeLf(n) => "size_lf"
+    ChunkData(l) => "data"
+    ChunkDataLf => "data_lf"
+    TrailerStart(r) => "trailer_start"
+    TrailerLine(r) => "trailer_line"
+    TrailerLf(r) => "trailer_lf"
+    ChunksEndLf => "end_lf"
+  }
+}
+fn chunks_run(t: Text, st: Text, out: Text, rest: Text): Unit ! {stdout, failed} {
+  let f := feed((c: Chunks, b: Nat) => Chunk::step(100, c, b), Chunks::start(100), Text::bytes(t))
+  let ok := Bool::and(
+    Text::eq(chunks_state_name(fed_state(f)), st),
+    byte_list_eq(fed_out(f), Text::bytes(out)) && byte_list_eq(fed_rest(f), Text::bytes(rest))
+  )
+  match ok {
+    true => print(Text::concat_all(Cons("ok      chunked ", Cons(st, Cons("\n", Nil)))))
+    false => {
+      print(Text::concat_all(Cons("FAILED  chunked ", Cons(st, Cons("\n", Nil)))))
+      perform failed()
+    }
+  }
+}
+
+// Reading a request from a connection as its bytes arrive (`src/conn.taut`).
+
+fn text_of_bytes(bs: List(Nat)): Text {
+  Text::Mk(bs)
+}
+
+fn big_header(): Text {
+  Text::Mk(List::replicate(17000, 97))
+}
+
+fn took_name(t: Took): Text {
+  match t {
+    Wants(rd) => "wants"
+    Whole(r, rest) => Text::concat_all(
+      [
+        Method::text(HttpRequest::method(r)),
+        HttpRequest::path(r),
+        " ",
+        HttpRequest::body(r),
+        " | ",
+        text_of_bytes(rest)
+      ]
+    )
+    RefusedWith(s) => Text::of_nat(Status::code(s))
+  }
+}
+
+fn todo_answer(r: HttpRequest): Response {
+  text_response(Status::ok(), "ok")
+}
+
+// A request with one `connection` header for each value.
+fn connection_request(vs: List(Text)): HttpRequest {
+  HttpRequest::Mk(Get, "/", None, List::map((v: Text) => #(@name "Connection", @value v), vs), "")
+}
+
+fn wire_text(o: Option(Bytes)): Option(Text) {
+  match o {
+    None => None
+    Some(b) => Text::of_bytes(b)
+  }
+}
+
+fn served(ts: List(Text)): Text {
+  took_name(take_all(reading_start(), List::map((t: Text) => Text::bytes(t), ts)))
+}
+
+fn run_checks(): Unit ! {stdout, failed} {
+  check(
+    "a printed response reads back",
+    match parse_response(print_response(plain(Status::created(), "made"))) {
+      None => false
+      Some(r) => Nat::eq(Status::code(HttpResponse::status(r)), 201) && Text::eq(HttpResponse::body(r), "made")
+    }
+  )
+  check("percent-encoding", Text::eq(percent_encode("a b/辻&=~"), "a%20b%2F%E8%BE%BB%26%3D~"))
+  check("percent-decoding", Text::eq(percent_decode("a%20b%2F%E8%BE%BB%26%3D~+c"), "a b/辻&=~ c"))
+  check("bytes that are not UTF-8 stay encoded", Text::eq(percent_decode("%FF"), "%FF"))
+  check(
+    "printing checks headers built directly",
+    Text::starts_with(
+      print_response(
+        HttpResponse::Mk(Status::ok(), Cons(#(@name "x-a", @value "1\nx-b: 2"), Nil), "")
+      ),
+      "HTTP/1.1 500"
+    )
+  )
+  let frame_whole := feed(Head::step, Head::start(1000), frame_raw())
+  check("head read whole", Text::eq(frame_head_method(frame_whole), "GET/a"))
+  check("leaves the body", byte_list_eq(fed_rest(frame_whole), Text::bytes("abcGET")))
+  let frame_first := feed(Head::step, Head::start(1000), List::take(40, frame_raw()))
+  check(
+    "head cut in the middle is still reading",
+    Text::eq(frame_head_method(frame_first), "reading")
+  )
+  let frame_joined := feed_then(Head::step, frame_first, List::drop(40, frame_raw()))
+  check("head in two pieces", Text::eq(frame_head_method(frame_joined), "GET/a"))
+  check("two pieces leave the same", byte_list_eq(fed_rest(frame_joined), Text::bytes("abcGET")))
+  check(
+    "head too long",
+    Text::eq(frame_head_method(feed(Head::step, Head::start(20), frame_raw())), "too long")
+  )
+  let frame_hs := match fed_state(frame_whole) {
+    HeadRead(ls) => match parse_lines(ls) {
+      Some(r) => HttpRequest::headers(r)
+      None => Nil
+    }
+    HeadReading(l, d, b) => Nil
+    HeadTooLong => Nil
+  }
+  let frame_body := match HttpRequest::framing(1000, frame_hs) {
+    Sized(n) => feed(length_step, n, fed_rest(frame_whole))
+    NoBody => Fed::Mk(Zero, Nil, Nil)
+    Chunked => Fed::Mk(Zero, Nil, Nil)
+    ToClose => Fed::Mk(Zero, Nil, Nil)
+    Refused(s) => Fed::Mk(Zero, Nil, Nil)
+  }
+  check("body bytes", byte_list_eq(fed_out(frame_body), Text::bytes("abc")))
+  check("next request's bytes", byte_list_eq(fed_rest(frame_body), Text::bytes("GET")))
+  check(
+    "differing lengths refused",
+    match HttpRequest::framing(1000, [#(@name "Content-Length", @value "4"), #(@name "content-length", @value "2")]) {
+      Refused(s) => Nat::eq(Status::code(s), 400)
+      Sized(n) => false
+      NoBody => false
+      Chunked => false
+      ToClose => false
+    }
+  )
+  chunks_run(
+    "4\r\nWiki\r\n5;x=y\r\npedia\r\nE\r\n in\r\n\r\nchunks.\r\n0\r\nExpires: x\r\n\r\nNEXT",
+    "done",
+    "Wikipedia in\r\n\r\nchunks.",
+    "NEXT"
+  )
+  chunks_run("4\r\nWiki\r\n0\r\n\r\n", "done", "Wiki", "")
+  chunks_run("4\r\nWikiX\r\n", "bad", "Wiki", "\r\n")
+  chunks_run("\r\n", "bad", "", "\n")
+  chunks_run("10\r\n0123456789abcdef\r\n0\r\n\r\n", "done", "0123456789abcdef", "")
+  chunks_run("4\r\nWi", "data", "Wi", "")
+  check(
+    "chunked bytes read back",
+    byte_list_eq(
+      fed_out(
+        Chunks::feed(
+          100,
+          Chunks::start(100),
+          chunked_bytes([Text::bytes("ab"), Text::bytes("cde")])
+        )
+      ),
+      Text::bytes("abcde")
+    )
+  )
+  check(
+    "request in pieces",
+    Text::eq(
+      served(["POST /a HT", "TP/1.1\r\ncontent-le", "ngth: 3\r\n\r\nab", "cGET"]),
+      "POST/a abc | GET"
+    )
+  )
+  check("request cut short wants more", Text::eq(served(["GET /a HTTP/1.1\r\n"]), "wants"))
+  check(
+    "chunked request",
+    Text::eq(
+      served(["POST /a HTTP/1.1\r\ntransfer-encoding: chunked\r\n\r\n3\r\nab", "c\r\n0\r\n\r\n"]),
+      "POST/a abc | "
+    )
+  )
+  check(
+    "a body that is not UTF-8",
+    Text::eq(
+      took_name(
+        take_all(
+          reading_start(),
+          [Text::bytes("POST /a HTTP/1.1\r\ncontent-length: 1\r\n\r\n"), Cons(255, Nil)]
+        )
+      ),
+      "400"
+    )
+  )
+  check(
+    "malformed chunks",
+    Text::eq(
+      served(["POST /a HTTP/1.1\r\ntransfer-encoding: chunked\r\n\r\n3\r\nabc\r\nzz\r\n"]),
+      "400"
+    )
+  )
+  check(
+    "length and chunked together",
+    Text::eq(
+      served(["POST /a HTTP/1.1\r\ncontent-length: 3\r\ntransfer-encoding: chunked\r\n\r\nabc"]),
+      "400"
+    )
+  )
+  check(
+    "body over the limit",
+    Text::eq(served(["POST /a HTTP/1.1\r\ncontent-length: 2000000\r\n\r\nabc"]), "413")
+  )
+  check(
+    "head over the limit",
+    Text::eq(served(["GET /a HTTP/1.1\r\nx-big: ", big_header(), "\r\n\r\n"]), "431")
+  )
+  check(
+    "the answer closes the connection",
+    match wire_text(answer_took(todo_answer, take_all(reading_start(), [Text::bytes("GET /api/todos/0 HTTP/1.1\r\n\r\n")]))) {
+        Some(t) => Text::eq(
+          t,
+          "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-type: text/plain; charset=utf-8\r\ncontent-length: 2\r\n\r\nok"
+        )
+        None => false
+    }
+  )
+  check(
+    "a handler's content-length is replaced by the body's",
+    Text::eq(
+      response_text(
+        false,
+        with_header(
+          with_header(
+            with_header(text_response(Status::ok(), "ok"), "content-length", "1"),
+            "x-a",
+            "1"
+          ),
+          "Content-Length",
+          "999"
+        )
+      ),
+      "HTTP/1.1 200 OK\r\nx-a: 1\r\ncontent-type: text/plain; charset=utf-8\r\ncontent-length: 2\r\n\r\nok"
+    )
+  )
+  check(
+    "a handler's transfer-encoding is dropped",
+    Text::eq(
+      response_text(
+        false,
+        with_header(
+          with_header(
+            with_header(text_response(Status::ok(), "ok"), "transfer-encoding", "chunked"),
+            "x-a",
+            "1"
+          ),
+          "Transfer-Encoding",
+          "gzip, chunked"
+        )
+      ),
+      "HTTP/1.1 200 OK\r\nx-a: 1\r\ncontent-type: text/plain; charset=utf-8\r\ncontent-length: 2\r\n\r\nok"
+    )
+  )
+  check(
+    "a closing answer has the one connection: close, whatever connection the handler set",
+    match wire_text(
+      Some(
+        finish_response(
+          false,
+          true,
+          with_header(
+            with_header(
+              with_header(text_response(Status::ok(), "ok"), "connection", "keep-alive"),
+              "x-a",
+              "1"
+            ),
+            "Connection",
+            "upgrade"
+          )
+        )
+      )
+    ) {
+      Some(t) => Text::eq(
+        t,
+        "HTTP/1.1 200 OK\r\nconnection: close\r\nx-a: 1\r\ncontent-type: text/plain; charset=utf-8\r\ncontent-length: 2\r\n\r\nok"
+      )
+      None => false
+    }
+  )
+  check(
+    "an answer that goes on has no connection header, whatever the handler set",
+    match wire_text(
+      Some(
+        finish_response(
+          false,
+          false,
+          with_header(
+            with_header(
+              with_header(text_response(Status::ok(), "ok"), "connection", "close"),
+              "x-a",
+              "1"
+            ),
+            "Connection",
+            "keep-alive"
+          )
+        )
+      )
+    ) {
+      Some(t) => Text::eq(
+        t,
+        "HTTP/1.1 200 OK\r\nx-a: 1\r\ncontent-type: text/plain; charset=utf-8\r\ncontent-length: 2\r\n\r\nok"
+      )
+      None => false
+    }
+  )
+  check(
+    "http's print_response also drops a transfer-encoding",
+    Text::eq(
+      print_response(
+        HttpResponse::Mk(
+          Status::ok(),
+          [#(@name "Transfer-Encoding", @value "chunked"), #(@name "x-a", @value "1")],
+          "ok"
+        )
+      ),
+      "HTTP/1.1 200 OK\r\nx-a: 1\r\ncontent-length: 2\r\n\r\nok"
+    )
+  )
+  check(
+    "http's print_response also writes one content-length",
+    Text::eq(
+      print_response(
+        HttpResponse::Mk(Status::ok(), [#(@name "Content-Length", @value "999")], "ok")
+      ),
+      "HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok"
+    )
+  )
+  check("one connection header without close", not(asks_close(connection_request(["keep-alive"]))))
+  check("a close in the only connection header", asks_close(connection_request(["Close"])))
+  check(
+    "close in a later connection header",
+    asks_close(connection_request(["keep-alive", "close"]))
+  )
+  check("close among the options", asks_close(connection_request(["upgrade", "foo, Close"])))
+  check("no connection header", not(asks_close(connection_request([]))))
+  check(
+    "a refusal has its reason",
+    match wire_text(answer_took(todo_answer, RefusedWith(Status::request_header_fields_too_large()))) {
+        Some(t) => Text::eq(
+          t,
+          "HTTP/1.1 431 Request Header Fields Too Large\r\nconnection: close\r\ncontent-type: text/plain; charset=utf-8\r\ncontent-length: 31\r\n\r\nRequest Header Fields Too Large"
+        )
+        None => false
+    }
+  )
+}
+
+perform main(() => {
+  var any_failed := false
+  handle { run_checks() } with {
+    failed(), cont => {
+      any_failed := true
+      cont(#())
+    }
+  }
+  if any_failed { perform exit(1) }
+})

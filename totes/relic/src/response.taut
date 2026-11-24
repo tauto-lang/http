@@ -1,0 +1,134 @@
+import std::base { List }
+import std::text { Text }
+import "../../http/src/http.taut" { HttpRequest, Method, headers_valid_text, reason }
+import "../../http/src/status.taut" { Status }
+import "../../http/src/bytes.taut" { bytes_eq_ci }
+import "../../http/src/wire.taut" { keep_unless, without_framing }
+
+// What a handler returns. The body is `Bytes`: shared, so handing it on is a
+// reference count, not a copy of the bytes. Headers are checked before they
+// are written; a name or value that could split the response becomes 500.
+pub struct Response {
+  status: Status,
+  headers: List(@name Text × @value Text),
+  body: Bytes
+}
+
+pub fn text_response(status: Status, body: Text): Response {
+  Response {
+    status: status,
+    headers: [#(@name "content-type", @value "text/plain; charset=utf-8")],
+    body: Bytes::of_text(body)
+  }
+}
+
+pub fn bytes_response(status: Status, body: Bytes): Response {
+  Response {
+    status: status,
+    headers: [#(@name "content-type", @value "application/octet-stream")],
+    body: body
+  }
+}
+
+pub fn with_header(r: Response, name: Text, value: Text): Response {
+  Response {
+    status: r.status,
+    headers: Cons(#(@name name, @value value), r.headers),
+    body: r.body
+  }
+}
+
+// `hs` was consed as headers were set, so the last one is first.
+pub fn prepend_headers(r: Response, hs: List(@name Text × @value Text)): Response {
+  Response {
+    status: r.status,
+    headers: List::append(List::reverse(hs), r.headers),
+    body: r.body
+  }
+}
+
+pub fn method_not_allowed(allow: Text): Response {
+  with_header(text_response(Status::method_not_allowed(), "Method Not Allowed"), "allow", allow)
+}
+
+fn invalid(): Response {
+  text_response(Status::internal_server_error(), "invalid response header")
+}
+
+fn gated(r: Response): Response {
+  if headers_valid_text(r.headers) { r } else { invalid() }
+}
+
+fn header_line(h: @name Text × @value Text): Text {
+  concat((h: @name Text), concat(": ", concat((h: @value Text), "\r\n")))
+}
+
+fn header_lines(hs: List(@name Text × @value Text)): Text {
+  match hs {
+    Nil => ""
+    Cons(h, rest) => concat(header_line(h), header_lines(rest))
+  }
+}
+
+fn status_line(s: Status): Text {
+  concat("HTTP/1.1 ", concat(Text::of_nat(Status::code(s)), concat(" ", concat(reason(s), "\r\n"))))
+}
+
+// A `content-length` or `transfer-encoding` among the handler's headers is dropped (the
+// names compared without ASCII case, as `sent_headers` of `http/src/wire.taut` does): the
+// body goes out by its length, and the one `content-length` written is the body's.
+fn head_text(r: Response): Text {
+  concat(
+    status_line(r.status),
+    concat(
+      header_lines(without_framing(r.headers)),
+      concat("content-length: ", concat(Text::of_u64(Bytes::len(r.body)), "\r\n\r\n"))
+    )
+  )
+}
+
+// The bytes on the wire. `head` is a HEAD request: the length is the body's,
+// and the body itself is not written.
+pub fn response_bytes(head: Bool, res: Response): Bytes {
+  let safe := gated(res)
+  let prefix := Bytes::of_text(head_text(safe))
+  if head { prefix } else { Bytes::concat(prefix, safe.body) }
+}
+
+// The same bytes, when they are UTF-8. A binary body has no text form.
+pub fn response_text(head: Bool, res: Response): Text {
+  match Text::of_bytes(response_bytes(head, res)) {
+    Some(t) => t
+    None => ""
+  }
+}
+
+pub fn is_head(r: HttpRequest): Bool {
+  Method::eq(HttpRequest::method(r), Head)
+}
+
+// Whether a header is called `connection`, whatever the case of its name.
+fn is_connection(h: @name Text × @value Text): Bool {
+  bytes_eq_ci(Text::bytes((h: @name Text)), Text::bytes("connection"))
+}
+
+// The headers without any `connection`.
+fn without_connection(hs: List(@name Text × @value Text)): List(@name Text × @value Text) {
+  match hs {
+    Nil => Nil
+    Cons(h, rest) => keep_unless(is_connection(h), h, without_connection(rest))
+  }
+}
+
+// Whether to keep the connection is relic's to say, not the handler's: any `connection`
+// among the handler's headers is dropped (the name compared without ASCII case).
+// `close` then adds the one `connection: close`, for the last request on a connection;
+// otherwise the response has no `connection` header.
+pub fn finish_response(head: Bool, close: Bool, res: Response): Bytes {
+  let kept := Response {
+    status: res.status,
+    headers: without_connection(res.headers),
+    body: res.body
+  }
+  response_bytes(head, if close { with_header(kept, "connection", "close") } else { kept })
+}

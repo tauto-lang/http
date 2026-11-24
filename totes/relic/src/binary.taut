@@ -1,0 +1,231 @@
+import std::builtin::os {
+  Host,
+  IoError,
+  Shutdown,
+  TcpAccepted,
+  TcpListener,
+  TcpRead,
+  TcpStream,
+  TcpWritten,
+  io_message,
+  monotonic_clock,
+  sleep,
+  stderr,
+  stop,
+  tcp_accept,
+  tcp_close,
+  tcp_listen,
+  tcp_read,
+  tcp_shutdown,
+  tcp_write
+}
+import std::builtin::par { Mutex, mutex_claim, mutex_new, mutex_take_claimed, wait }
+import "../../http/src/http.taut" { reason_in, reasons }
+import "conn.taut" { accept_retry_ms }
+
+// A small HTTP/1.1 server for immutable binary assets. One request per connection.
+// The callback is pure: callers can preload files before opening the listener.
+pub(open) struct(shared) BinaryRequest { method: Text, path: Text }
+pub(open) struct(shared) BinaryResponse { status: u64, content_type: Text, body: Bytes }
+
+// A count that cannot go on (`overflow`) is answered on the safe side: the
+// header is refused, the request is not complete.
+fn has_line_break(t: Text): Bool ! {div} {
+  handle {
+    var i := 0
+    var found := false
+    while i < Text::len(t) {
+      match Text::byte(t, i) {
+        Some(b) => if U64::of_u8(b) == 10 || U64::of_u8(b) == 13 { found := true } else { #() },
+        None => #()
+      }
+      i := i + 1
+    }
+    found
+  } with { overflow() => true }
+}
+fn complete(t: Text): Bool ! {div} {
+  handle {
+    var i := 0
+    var found := false
+    while i + 3 < Text::len(t) {
+      if slice_text(t, i, i+4) == "\r\n\r\n" { found := true } else { #() }
+      i := i + 1
+    }
+    found
+  } with { overflow() => false }
+}
+pub fn binary_wire(r: BinaryResponse, head: Bool): Bytes ! {div} {
+  let safe := if has_line_break(r.content_type) {
+    BinaryResponse {
+      status: 500,
+      content_type: "text/plain",
+      body: Bytes::of_text("Invalid response header")
+    }
+  } else { r }
+  // The reason phrase of the status (RFC 9110); empty for a status without one, which
+  // HTTP/1.1 allows.
+  let reason := reason_in(Nat::of_u64(safe.status), reasons())
+  let prefix := Bytes::of_text(
+    join_text(
+      [
+        "HTTP/1.1 ",
+        Text::of_u64(safe.status),
+        " ",
+        reason,
+        "\r\ncontent-type: ",
+        safe.content_type,
+        "\r\ncontent-length: ",
+        Text::of_u64(Bytes::len(safe.body)),
+        "\r\nconnection: close\r\nx-content-type-options: nosniff\r\n\r\n"
+      ]
+    )
+  )
+  if head { prefix } else { Bytes::concat(prefix, safe.body) }
+}
+fn failure(status: u64): BinaryResponse {
+  BinaryResponse {
+    status: status,
+    content_type: "text/plain",
+    body: Bytes::of_text("Request rejected")
+  }
+}
+pub fn binary_request(raw: Text): Option(BinaryRequest) ! {div} {
+  // Only the request line is considered; a bounded, complete head is required.
+  if not(complete(raw)) { None } else {
+    handle {
+      var end := 0
+      while end < Text::len(raw) && slice_text(raw, end, end+1) != "\r" { end := end + 1 }
+      match words(slice_text(raw, 0, end)) {
+        Cons(method, Cons(path, Cons(version, Nil))) => if version == "HTTP/1.1" && slice_text(
+          path,
+          0,
+          1
+        ) == "/" { Some(BinaryRequest { method: method, path: path }) } else { None }
+        Nil => None
+        Cons(method, Nil) => None
+        Cons(method, Cons(path, Nil)) => None
+        Cons(method, Cons(path, Cons(version, Cons(extra, more)))) => None
+      }
+    } with { overflow() => None }
+  }
+}
+// When a read or a write that starts now gives up: ten seconds on.
+fn binary_deadline(): i64 ! {monotonic_clock} {
+  let now := perform monotonic_clock()
+  handle { now + 10000000000 } with { overflow() => now }
+}
+
+// A connection given back with the text read from it.
+struct(affine) Received { conn: TcpStream, raw: Text }
+
+fn receive(c: TcpStream, deadline: i64, raw: Text): Received ! {tcp_read, div} {
+  if Text::len(raw) > 16384 { Received { conn: c, raw: raw } } else {
+    match perform tcp_read(c, 4096, Some(deadline)) {
+      TcpRead { stream, got } => match got {
+        Ok(bytes) => if Bytes::len(bytes) == 0 { Received { conn: stream, raw: raw } } else {
+          match Text::of_bytes(bytes) {
+            Some(t) => {
+              let more := concat(raw, t)
+              if complete(more) { Received { conn: stream, raw: more } } else {
+                receive(stream, deadline, more)
+              }
+            }
+            None => Received { conn: stream, raw: raw }
+          }
+        }
+        Err(_) => Received { conn: stream, raw: raw }
+      }
+    }
+  }
+}
+// What serving one connection asks of the host, besides what the callback asks.
+pub effect BinaryIo {
+  div,
+  monotonic_clock,
+  mutex_claim,
+  mutex_new,
+  mutex_take_claimed,
+  sleep,
+  stderr,
+  tcp_close,
+  tcp_read,
+  tcp_shutdown,
+  tcp_write,
+  wait
+}
+
+fn answer<!h: Host>(c: TcpStream, f: (BinaryRequest) -> BinaryResponse ! h): Unit ! {BinaryIo} ∪ h {
+  match receive(c, binary_deadline(), "") {
+    Received { conn, raw } => {
+      let request := binary_request(raw)
+      // The connection waits in a mutex while `f` runs: `f` may resume more than
+      // once, and a connection may not be held across that.
+      let parked := perform mutex_new(conn)
+      let response := if Text::len(raw) > 16384 { failure(431) } else { match request {
+          Some(req) => if req.method == "GET" || req.method == "HEAD" { f(req) } else {
+            failure(405)
+          }
+          None => failure(400)
+        } }
+      let head := match request { Some(req) => req.method == "HEAD", None => false }
+      match perform tcp_write(
+        Mutex::take(parked),
+        binary_wire(response, head),
+        Some(binary_deadline())
+      ) {
+        TcpWritten { stream, result } => {
+          match result { Ok(_) => #(), Err(e) => perform stderr(io_message(e)) }
+          match perform tcp_shutdown(
+            TcpStream::stopper(&stream),
+            ShutdownWrite
+          ) { Ok(_) => #(), Err(_) => #() }
+          perform tcp_close(stream)
+        }
+      }
+    }
+  }
+}
+fn accept_each<!h: Host>(
+  l: TcpListener,
+  f: (BinaryRequest) -> BinaryResponse ! h
+): Unit ! {BinaryIo, tcp_accept} ∪ h {
+  match perform tcp_accept(l, None) {
+    TcpAccepted { listener, got } => match got {
+      Ok(c) => {
+        let parked := perform mutex_new(listener)
+        answer(c, f)
+        accept_each(Mutex::take(parked), f)
+      }
+      // Accepting that is not permitted stops the server; any other failure (out of file
+      // descriptors, say) is reported, and accepting goes on after a short wait.
+      Err(Denied(m)) => perform stderr(concat(m, "\n"))
+      Err(e) => {
+        perform stderr(concat(io_message(e), "\n"))
+        perform sleep(accept_retry_ms())
+        accept_each(listener, f)
+      }
+    }
+  }
+}
+pub fn serve_binary<!h: Host>(
+  address: Text,
+  f: (BinaryRequest) -> BinaryResponse ! h
+): Unit ! {BinaryIo, stop, tcp_accept, tcp_listen} ∪ h {
+  match perform tcp_listen(address) {
+    Err(e) => perform stop(io_message(e))
+    Ok(listener) => {
+      perform stderr(concat("listening on ", TcpListener::address(&listener)))
+      accept_each(listener, f)
+    }
+  }
+}
+
+fn slice_text(
+  t: Text,
+  a: u64,
+  b: u64
+): Text { match Text::slice(t, a, b) { Some(s) => s, None => "" } }
+fn join_text(
+  xs: List(Text)
+): Text ! {div} { match xs { Nil => "", Cons(x, rest) => concat(x, join_text(rest)) } }
