@@ -1,0 +1,548 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>src/conn.taut</title><style>:root{color-scheme:light dark;--bg:#fff;--fg:#1f2328;--mut:#6e7781;--kw:#cf222e;--str:#0a3069;--num:#0550ae;--com:#6e7781;--mac:#8250df;--ty:#953800;--fn:#6639ba;--var:#116329;--op:#0550ae;--link:#0969da;--sel:#fff8c5}@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--mut:#7d8590;--kw:#ff7b72;--str:#a5d6ff;--num:#79c0ff;--com:#8b949e;--mac:#d2a8ff;--ty:#ffa657;--fn:#d2a8ff;--var:#7ee787;--op:#79c0ff;--link:#58a6ff;--sel:#3a3000}}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,sans-serif}nav,main{padding:8px 16px}a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}pre{margin:0;padding:8px 0;font:13px/1.5 ui-monospace,monospace;overflow-x:auto}pre a{color:inherit}pre a[href^="#"],pre a[href*=".html"]{text-decoration:underline dotted}.ln{display:inline-block;width:5ch;margin-right:2ch;text-align:right;color:var(--mut);user-select:none;text-decoration:none!important}.ln:target{background:var(--sel)}.kw{color:var(--kw)}.str{color:var(--str)}.num{color:var(--num)}.com{color:var(--com)}.mac{color:var(--mac)}.ty{color:var(--ty)}.fn{color:var(--fn)}.var{color:var(--var)}.op{color:var(--op)}ul{list-style:none;padding-left:0}li li{padding-left:2ch}.kind{color:var(--mut)}</style>
+<nav><a href="../index.html">index</a> / src/conn.taut</nav>
+<pre><code><a class="ln" id="L1" href="#L1">1</a><span class="kw">import</span> std::builtin::os {
+<a class="ln" id="L2" href="#L2">2</a>  <span class="ty">Host</span>,
+<a class="ln" id="L3" href="#L3">3</a>  <span class="ty">IoError</span>,
+<a class="ln" id="L4" href="#L4">4</a>  <span class="ty">Shutdown</span>,
+<a class="ln" id="L5" href="#L5">5</a>  <span class="ty">TcpAccepted</span>,
+<a class="ln" id="L6" href="#L6">6</a>  <span class="ty">TcpListener</span>,
+<a class="ln" id="L7" href="#L7">7</a>  <span class="ty">TcpRead</span>,
+<a class="ln" id="L8" href="#L8">8</a>  <span class="ty">TcpStream</span>,
+<a class="ln" id="L9" href="#L9">9</a>  <span class="ty">TcpWritten</span>,
+<a class="ln" id="L10" href="#L10">10</a>  io_message,
+<a class="ln" id="L11" href="#L11">11</a>  monotonic_clock,
+<a class="ln" id="L12" href="#L12">12</a>  sleep,
+<a class="ln" id="L13" href="#L13">13</a>  stderr,
+<a class="ln" id="L14" href="#L14">14</a>  tcp_accept,
+<a class="ln" id="L15" href="#L15">15</a>  tcp_close,
+<a class="ln" id="L16" href="#L16">16</a>  tcp_listen,
+<a class="ln" id="L17" href="#L17">17</a>  tcp_read,
+<a class="ln" id="L18" href="#L18">18</a>  tcp_shutdown,
+<a class="ln" id="L19" href="#L19">19</a>  tcp_write
+<a class="ln" id="L20" href="#L20">20</a>}
+<a class="ln" id="L21" href="#L21">21</a><span class="kw">import</span> <span class="str">&quot;../../http/src/wire.taut&quot;</span> { parse_lines }
+<a class="ln" id="L22" href="#L22">22</a><span class="kw">import</span> std::base { <span class="ty">List</span>, <span class="ty">Nat</span> }
+<a class="ln" id="L23" href="#L23">23</a><span class="kw">import</span> std::list { <span class="ty">List</span> }
+<a class="ln" id="L24" href="#L24">24</a><span class="kw">import</span> std::text { <span class="ty">Text</span> }
+<a class="ln" id="L25" href="#L25">25</a><span class="kw">import</span> std::text_ops { <span class="ty">Bytes</span> }
+<a class="ln" id="L26" href="#L26">26</a><span class="kw">import</span> std::builtin::par {
+<a class="ln" id="L27" href="#L27">27</a>  <span class="ty">Mutex</span>,
+<a class="ln" id="L28" href="#L28">28</a>  <span class="ty">Semaphore</span>,
+<a class="ln" id="L29" href="#L29">29</a>  <span class="ty">Task</span>,
+<a class="ln" id="L30" href="#L30">30</a>  mutex_claim,
+<a class="ln" id="L31" href="#L31">31</a>  mutex_new,
+<a class="ln" id="L32" href="#L32">32</a>  mutex_put,
+<a class="ln" id="L33" href="#L33">33</a>  mutex_take_claimed,
+<a class="ln" id="L34" href="#L34">34</a>  spawn,
+<a class="ln" id="L35" href="#L35">35</a>  wait
+<a class="ln" id="L36" href="#L36">36</a>}
+<a class="ln" id="L37" href="#L37">37</a><span class="kw">import</span> <span class="str">&quot;../../http/src/bytes.taut&quot;</span> { bytes_eq_ci }
+<a class="ln" id="L38" href="#L38">38</a><span class="kw">import</span> <span class="str">&quot;../../http/src/status.taut&quot;</span> { <span class="ty">Status</span> }
+<a class="ln" id="L39" href="#L39">39</a><span class="kw">import</span> <span class="str">&quot;../../http/src/http.taut&quot;</span> { <span class="ty">HttpRequest</span>, reason }
+<a class="ln" id="L40" href="#L40">40</a><span class="kw">import</span> <span class="str">&quot;response.taut&quot;</span> { <span class="ty">Response</span>, finish_response, is_head, text_response }
+<a class="ln" id="L41" href="#L41">41</a><span class="kw">import</span> <span class="str">&quot;../../http/src/at.taut&quot;</span> { lines_at }
+<a class="ln" id="L42" href="#L42">42</a><span class="kw">import</span> <span class="str">&quot;../../http/src/frame.taut&quot;</span> {
+<a class="ln" id="L43" href="#L43">43</a>  <span class="ty">Chunks</span>,
+<a class="ln" id="L44" href="#L44">44</a>  <span class="ty">Fed</span>,
+<a class="ln" id="L45" href="#L45">45</a>  <span class="ty">Framing</span>,
+<a class="ln" id="L46" href="#L46">46</a>  <span class="ty">Head</span>,
+<a class="ln" id="L47" href="#L47">47</a>  <span class="ty">HeadAt</span>,
+<a class="ln" id="L48" href="#L48">48</a>  <span class="ty">HttpRequest</span>,
+<a class="ln" id="L49" href="#L49">49</a>  <span class="ty">RequestHead</span>,
+<a class="ln" id="L50" href="#L50">50</a>  feed,
+<a class="ln" id="L51" href="#L51">51</a>  length_step
+<a class="ln" id="L52" href="#L52">52</a>}
+<a class="ln" id="L53" href="#L53">53</a>
+<a class="ln" id="L54" href="#L54">54</a><span class="com">// HTTP/1.1 over TCP (`--allow-net`). The bytes of a connection go through the</span>
+<a class="ln" id="L55" href="#L55">55</a><span class="com">// readers of `frame.taut` into a `HttpRequest`, a function answers it, and the</span>
+<a class="ln" id="L56" href="#L56">56</a><span class="com">// response goes back on the same connection, which stays open for the next request</span>
+<a class="ln" id="L57" href="#L57">57</a><span class="com">// until the client asks to close, goes quiet, or has had its fill (`requests_per_connection`).</span>
+<a class="ln" id="L58" href="#L58">58</a><span class="com">// Reading a request is pure (`take_all`), so it runs without a network.</span>
+<a class="ln" id="L59" href="#L59">59</a>
+<a class="ln" id="L60" href="#L60">60</a><span class="com">// The most bytes a request's head may take.</span>
+<a class="ln" id="L61" href="#L61">61</a><span class="kw">fn</span> <span class="fn">head_limit</span>(): <span class="ty">Nat</span> {
+<a class="ln" id="L62" href="#L62">62</a>  <span class="num">16384</span>
+<a class="ln" id="L63" href="#L63">63</a>}
+<a class="ln" id="L64" href="#L64">64</a>
+<a class="ln" id="L65" href="#L65">65</a><span class="com">// The most bytes a request's body may take; past it the answer is 413.</span>
+<a class="ln" id="L66" href="#L66">66</a><span class="kw">fn</span> <span class="fn">body_limit</span>(): <span class="ty">Nat</span> {
+<a class="ln" id="L67" href="#L67">67</a>  <span class="num">1048576</span>
+<a class="ln" id="L68" href="#L68">68</a>}
+<a class="ln" id="L69" href="#L69">69</a>
+<a class="ln" id="L70" href="#L70">70</a><span class="com">// The most bytes a chunk's size line may take, with its extensions, and the</span>
+<a class="ln" id="L71" href="#L71">71</a><span class="com">// trailers together.</span>
+<a class="ln" id="L72" href="#L72">72</a><span class="kw">fn</span> <span class="fn">size_line_limit</span>(): <span class="ty">Nat</span> {
+<a class="ln" id="L73" href="#L73">73</a>  <span class="num">1024</span>
+<a class="ln" id="L74" href="#L74">74</a>}
+<a class="ln" id="L75" href="#L75">75</a>
+<a class="ln" id="L76" href="#L76">76</a><span class="com">// Where a request stands as its bytes arrive.</span>
+<a class="ln" id="L77" href="#L77">77</a><span class="kw">inductive</span> <span class="ty">Reading</span>: <span class="ty">Type</span> {
+<a class="ln" id="L78" href="#L78">78</a>  <span class="ty">ReadingHead</span>(<span class="var">h</span>: <span class="ty">RequestHead</span>): <a href="#L77"><span class="ty">Reading</span></a>
+<a class="ln" id="L79" href="#L79">79</a>  <span class="com">// The request without its body, how many body bytes are still to come, and</span>
+<a class="ln" id="L80" href="#L80">80</a>  <span class="com">// the pieces of the body so far, the last first.</span>
+<a class="ln" id="L81" href="#L81">81</a>  <span class="ty">ReadingSized</span>(<span class="var">r</span>: <span class="ty">HttpRequest</span>, <span class="var">left</span>: <span class="ty">Nat</span>, <span class="var">parts</span>: <span class="ty">List</span>(<span class="ty">List</span>(<span class="ty">Nat</span>))): <a href="#L77"><span class="ty">Reading</span></a>
+<a class="ln" id="L82" href="#L82">82</a>  <span class="com">// The request without its body, the chunked reader, the pieces of the body</span>
+<a class="ln" id="L83" href="#L83">83</a>  <span class="com">// so far, the last first, and how many bytes they hold.</span>
+<a class="ln" id="L84" href="#L84">84</a>  <span class="ty">ReadingChunks</span>(<span class="var">r</span>: <span class="ty">HttpRequest</span>, <span class="var">c</span>: <span class="ty">Chunks</span>, <span class="var">parts</span>: <span class="ty">List</span>(<span class="ty">List</span>(<span class="ty">Nat</span>)), <span class="var">size</span>: <span class="ty">Nat</span>): <a href="#L77"><span class="ty">Reading</span></a>
+<a class="ln" id="L85" href="#L85">85</a>}
+<a class="ln" id="L86" href="#L86">86</a>
+<a class="ln" id="L87" href="#L87">87</a><span class="kw">pub(open)</span> <span class="kw">inductive</span> <span class="ty">Took</span>: <span class="ty">Type</span> {
+<a class="ln" id="L88" href="#L88">88</a>  <span class="com">// More bytes are needed.</span>
+<a class="ln" id="L89" href="#L89">89</a>  <span class="ty">Wants</span>(<span class="var">r</span>: <a href="#L77"><span class="ty">Reading</span></a>): <a href="#L87"><span class="ty">Took</span></a>
+<a class="ln" id="L90" href="#L90">90</a>  <span class="com">// The whole request, and the bytes after it.</span>
+<a class="ln" id="L91" href="#L91">91</a>  <span class="ty">Whole</span>(<span class="var">r</span>: <span class="ty">HttpRequest</span>, <span class="var">rest</span>: <span class="ty">List</span>(<span class="ty">Nat</span>)): <a href="#L87"><span class="ty">Took</span></a>
+<a class="ln" id="L92" href="#L92">92</a>  <span class="com">// The request cannot be read; the answer has this status.</span>
+<a class="ln" id="L93" href="#L93">93</a>  <span class="ty">RefusedWith</span>(<span class="var">status</span>: <span class="ty">Status</span>): <a href="#L87"><span class="ty">Took</span></a>
+<a class="ln" id="L94" href="#L94">94</a>}
+<a class="ln" id="L95" href="#L95">95</a>
+<a class="ln" id="L96" href="#L96">96</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">reading_start</span>(): <a href="#L77"><span class="ty">Reading</span></a> {
+<a class="ln" id="L97" href="#L97">97</a>  <a href="#L78"><span class="ty">ReadingHead</span></a>(<span class="fn">Head::start</span>(<a href="#L61"><span class="fn">head_limit</span></a>()))
+<a class="ln" id="L98" href="#L98">98</a>}
+<a class="ln" id="L99" href="#L99">99</a>
+<a class="ln" id="L100" href="#L100">100</a><span class="kw">fn</span> <span class="fn">with_text</span>(<span class="var">r</span>: <span class="ty">HttpRequest</span>, <span class="var">o</span>: <span class="ty">Option</span>(<span class="ty">Text</span>), <span class="var">rest</span>: <span class="ty">List</span>(<span class="ty">Nat</span>)): <a href="#L87"><span class="ty">Took</span></a> {
+<a class="ln" id="L101" href="#L101">101</a>  <span class="kw">match</span> o {
+<a class="ln" id="L102" href="#L102">102</a>    <span class="ty">None</span> =&gt; <a href="#L93"><span class="ty">RefusedWith</span></a>(<span class="fn">Status::bad_request</span>())
+<a class="ln" id="L103" href="#L103">103</a>    <span class="ty">Some</span>(t) =&gt; ⊢ <a href="#L87"><span class="ty">Took</span></a> <span class="kw">from</span> <span class="kw">match</span> r {
+<a class="ln" id="L104" href="#L104">104</a>      <span class="ty">Mk</span>(m, p, q, hs, b) =&gt; <a href="#L91"><span class="ty">Whole</span></a>(<span class="ty">HttpRequest::Mk</span>(m, p, q, hs, t), rest)
+<a class="ln" id="L105" href="#L105">105</a>    }
+<a class="ln" id="L106" href="#L106">106</a>  }
+<a class="ln" id="L107" href="#L107">107</a>}
+<a class="ln" id="L108" href="#L108">108</a>
+<a class="ln" id="L109" href="#L109">109</a><span class="com">// The whole request with its body; a body that is not UTF-8 is refused.</span>
+<a class="ln" id="L110" href="#L110">110</a><span class="kw">fn</span> <span class="fn">with_body</span>(<span class="var">r</span>: <span class="ty">HttpRequest</span>, <span class="var">body</span>: <span class="ty">List</span>(<span class="ty">List</span>(<span class="ty">Nat</span>)), <span class="var">rest</span>: <span class="ty">List</span>(<span class="ty">Nat</span>)): <a href="#L87"><span class="ty">Took</span></a> {
+<a class="ln" id="L111" href="#L111">111</a>  <a href="#L100"><span class="fn">with_text</span></a>(r, <span class="fn">Text::of_utf8</span>(<span class="fn">List::concat</span>(<span class="fn">List::reverse</span>(body))), rest)
+<a class="ln" id="L112" href="#L112">112</a>}
+<a class="ln" id="L113" href="#L113">113</a>
+<a class="ln" id="L114" href="#L114">114</a><span class="kw">fn</span> <span class="fn">take_sized</span>(<span class="var">r</span>: <span class="ty">HttpRequest</span>, <span class="var">left</span>: <span class="ty">Nat</span>, <span class="var">parts</span>: <span class="ty">List</span>(<span class="ty">List</span>(<span class="ty">Nat</span>)), <span class="var">bs</span>: <span class="ty">List</span>(<span class="ty">Nat</span>)): <a href="#L87"><span class="ty">Took</span></a> {
+<a class="ln" id="L115" href="#L115">115</a>  <span class="kw">match</span> <span class="fn">feed</span>(length_step, left, bs) {
+<a class="ln" id="L116" href="#L116">116</a>    <span class="ty">Fed::Mk</span>(n, out, rest) =&gt; ⊢ <a href="#L87"><span class="ty">Took</span></a> <span class="kw">from</span> <span class="kw">match</span> n {
+<a class="ln" id="L117" href="#L117">117</a>      <span class="ty">Zero</span> =&gt; <a href="#L110"><span class="fn">with_body</span></a>(r, <span class="ty">Cons</span>(out, parts), rest)
+<a class="ln" id="L118" href="#L118">118</a>      <span class="ty">Succ</span>(k) =&gt; <a href="#L89"><span class="ty">Wants</span></a>(<a href="#L81"><span class="ty">ReadingSized</span></a>(r, n, <span class="ty">Cons</span>(out, parts)))
+<a class="ln" id="L119" href="#L119">119</a>    }
+<a class="ln" id="L120" href="#L120">120</a>  }
+<a class="ln" id="L121" href="#L121">121</a>}
+<a class="ln" id="L122" href="#L122">122</a>
+<a class="ln" id="L123" href="#L123">123</a><span class="kw">pub</span> <span class="kw">module</span> <span class="ty">Chunks</span> {
+<a class="ln" id="L124" href="#L124">124</a>  <span class="com">// `Some(true)` once the body ended, `Some(false)` when it is malformed.</span>
+<a class="ln" id="L125" href="#L125">125</a>  <span class="kw">fn</span> <span class="fn">over</span>(<span class="var">c</span>: <span class="ty">Chunks</span>): <span class="ty">Option</span>(<span class="ty">Bool</span>) {
+<a class="ln" id="L126" href="#L126">126</a>    <span class="kw">match</span> c {
+<a class="ln" id="L127" href="#L127">127</a>      <span class="ty">ChunkSize</span>(n, any, room) =&gt; <span class="ty">None</span>
+<a class="ln" id="L128" href="#L128">128</a>      <span class="ty">ChunkExt</span>(n, room) =&gt; <span class="ty">None</span>
+<a class="ln" id="L129" href="#L129">129</a>      <span class="ty">ChunkSizeLf</span>(n) =&gt; <span class="ty">None</span>
+<a class="ln" id="L130" href="#L130">130</a>      <span class="ty">ChunkData</span>(left) =&gt; <span class="ty">None</span>
+<a class="ln" id="L131" href="#L131">131</a>      <span class="ty">ChunkDataLf</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L132" href="#L132">132</a>      <span class="ty">TrailerStart</span>(room) =&gt; <span class="ty">None</span>
+<a class="ln" id="L133" href="#L133">133</a>      <span class="ty">TrailerLine</span>(room) =&gt; <span class="ty">None</span>
+<a class="ln" id="L134" href="#L134">134</a>      <span class="ty">TrailerLf</span>(room) =&gt; <span class="ty">None</span>
+<a class="ln" id="L135" href="#L135">135</a>      <span class="ty">ChunksEndLf</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L136" href="#L136">136</a>      <span class="ty">ChunksDone</span> =&gt; <span class="ty">Some</span>(<span class="kw">true</span>)
+<a class="ln" id="L137" href="#L137">137</a>      <span class="ty">ChunksBad</span> =&gt; <span class="ty">Some</span>(<span class="kw">false</span>)
+<a class="ln" id="L138" href="#L138">138</a>    }
+<a class="ln" id="L139" href="#L139">139</a>  }
+<a class="ln" id="L140" href="#L140">140</a>
+<a class="ln" id="L141" href="#L141">141</a>  <span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">took</span>(<span class="var">r</span>: <span class="ty">HttpRequest</span>, <span class="var">c</span>: <span class="ty">Chunks</span>, <span class="var">parts</span>: <span class="ty">List</span>(<span class="ty">List</span>(<span class="ty">Nat</span>)), <span class="var">size</span>: <span class="ty">Nat</span>, <span class="var">rest</span>: <span class="ty">List</span>(<span class="ty">Nat</span>)): <a href="#L87"><span class="ty">Took</span></a> {
+<a class="ln" id="L142" href="#L142">142</a>    <span class="kw">match</span> <span class="fn">Nat::le</span>(size, <a href="#L66"><span class="fn">body_limit</span></a>()) {
+<a class="ln" id="L143" href="#L143">143</a>      <span class="kw">false</span> =&gt; <a href="#L93"><span class="ty">RefusedWith</span></a>(<span class="fn">Status::content_too_large</span>())
+<a class="ln" id="L144" href="#L144">144</a>      <span class="kw">true</span> =&gt; ⊢ <a href="#L87"><span class="ty">Took</span></a> <span class="kw">from</span> <span class="kw">match</span> <span class="fn">Chunks::over</span>(c) {
+<a class="ln" id="L145" href="#L145">145</a>        <span class="ty">None</span> =&gt; <a href="#L89"><span class="ty">Wants</span></a>(<a href="#L84"><span class="ty">ReadingChunks</span></a>(r, c, parts, size))
+<a class="ln" id="L146" href="#L146">146</a>        <span class="ty">Some</span>(y) =&gt; ⊢ <a href="#L87"><span class="ty">Took</span></a> <span class="kw">from</span> <span class="kw">match</span> y {
+<a class="ln" id="L147" href="#L147">147</a>          <span class="kw">true</span> =&gt; <a href="#L110"><span class="fn">with_body</span></a>(r, parts, rest)
+<a class="ln" id="L148" href="#L148">148</a>          <span class="kw">false</span> =&gt; <a href="#L93"><span class="ty">RefusedWith</span></a>(<span class="fn">Status::bad_request</span>())
+<a class="ln" id="L149" href="#L149">149</a>        }
+<a class="ln" id="L150" href="#L150">150</a>      }
+<a class="ln" id="L151" href="#L151">151</a>    }
+<a class="ln" id="L152" href="#L152">152</a>  }
+<a class="ln" id="L153" href="#L153">153</a>}
+<a class="ln" id="L154" href="#L154">154</a>
+<a class="ln" id="L155" href="#L155">155</a><span class="kw">fn</span> <span class="fn">take_chunks</span>(<span class="var">r</span>: <span class="ty">HttpRequest</span>, <span class="var">c</span>: <span class="ty">Chunks</span>, <span class="var">parts</span>: <span class="ty">List</span>(<span class="ty">List</span>(<span class="ty">Nat</span>)), <span class="var">size</span>: <span class="ty">Nat</span>, <span class="var">bs</span>: <span class="ty">List</span>(<span class="ty">Nat</span>)): <a href="#L87"><span class="ty">Took</span></a> {
+<a class="ln" id="L156" href="#L156">156</a>  <span class="kw">match</span> <span class="fn">Chunks::feed</span>(<a href="#L72"><span class="fn">size_line_limit</span></a>(), c, bs) {
+<a class="ln" id="L157" href="#L157">157</a>    <span class="ty">Fed::Mk</span>(c2, out, rest) =&gt; <a href="#L141"><span class="fn">Chunks::took</span></a>(
+<a class="ln" id="L158" href="#L158">158</a>      r,
+<a class="ln" id="L159" href="#L159">159</a>      c2,
+<a class="ln" id="L160" href="#L160">160</a>      <span class="ty">Cons</span>(out, parts),
+<a class="ln" id="L161" href="#L161">161</a>      <span class="fn">Nat::add</span>(size, <span class="fn">List::length</span>(out)),
+<a class="ln" id="L162" href="#L162">162</a>      rest
+<a class="ln" id="L163" href="#L163">163</a>    )
+<a class="ln" id="L164" href="#L164">164</a>  }
+<a class="ln" id="L165" href="#L165">165</a>}
+<a class="ln" id="L166" href="#L166">166</a>
+<a class="ln" id="L167" href="#L167">167</a><span class="com">// After the head: how the body is framed decides how to read it. A request</span>
+<a class="ln" id="L168" href="#L168">168</a><span class="com">// never runs to the end of the connection.</span>
+<a class="ln" id="L169" href="#L169">169</a><span class="kw">fn</span> <span class="fn">take_body</span>(<span class="var">r</span>: <span class="ty">HttpRequest</span>, <span class="var">rest</span>: <span class="ty">List</span>(<span class="ty">Nat</span>)): <a href="#L87"><span class="ty">Took</span></a> {
+<a class="ln" id="L170" href="#L170">170</a>  <span class="kw">match</span> <span class="fn">HttpRequest::framing</span>(<a href="#L66"><span class="fn">body_limit</span></a>(), <span class="fn">HttpRequest::headers</span>(r)) {
+<a class="ln" id="L171" href="#L171">171</a>    <span class="ty">NoBody</span> =&gt; <a href="#L91"><span class="ty">Whole</span></a>(r, rest)
+<a class="ln" id="L172" href="#L172">172</a>    <span class="ty">Sized</span>(n) =&gt; <a href="#L114"><span class="fn">take_sized</span></a>(r, n, <span class="ty">Nil</span>, rest)
+<a class="ln" id="L173" href="#L173">173</a>    <span class="ty">Chunked</span> =&gt; <a href="#L155"><span class="fn">take_chunks</span></a>(r, <span class="fn">Chunks::start</span>(<a href="#L72"><span class="fn">size_line_limit</span></a>()), <span class="ty">Nil</span>, <span class="ty">Zero</span>, rest)
+<a class="ln" id="L174" href="#L174">174</a>    <span class="ty">ToClose</span> =&gt; <a href="#L93"><span class="ty">RefusedWith</span></a>(<span class="fn">Status::bad_request</span>())
+<a class="ln" id="L175" href="#L175">175</a>    <span class="ty">Refused</span>(status) =&gt; <a href="#L93"><span class="ty">RefusedWith</span></a>(status)
+<a class="ln" id="L176" href="#L176">176</a>  }
+<a class="ln" id="L177" href="#L177">177</a>}
+<a class="ln" id="L178" href="#L178">178</a>
+<a class="ln" id="L179" href="#L179">179</a><span class="kw">pub</span> <span class="kw">module</span> <span class="ty">Head</span> {
+<a class="ln" id="L180" href="#L180">180</a>  <span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">parsed</span>(<span class="var">o</span>: <span class="ty">Option</span>(<span class="ty">HttpRequest</span>), <span class="var">rest</span>: <span class="ty">List</span>(<span class="ty">Nat</span>)): <a href="#L87"><span class="ty">Took</span></a> {
+<a class="ln" id="L181" href="#L181">181</a>    <span class="kw">match</span> o {
+<a class="ln" id="L182" href="#L182">182</a>      <span class="ty">None</span> =&gt; <a href="#L93"><span class="ty">RefusedWith</span></a>(<span class="fn">Status::bad_request</span>())
+<a class="ln" id="L183" href="#L183">183</a>      <span class="ty">Some</span>(r) =&gt; <a href="#L169"><span class="fn">take_body</span></a>(r, rest)
+<a class="ln" id="L184" href="#L184">184</a>    }
+<a class="ln" id="L185" href="#L185">185</a>  }
+<a class="ln" id="L186" href="#L186">186</a>}
+<a class="ln" id="L187" href="#L187">187</a>
+<a class="ln" id="L188" href="#L188">188</a><span class="kw">fn</span> <span class="fn">take_head</span>(<span class="var">h</span>: <span class="ty">RequestHead</span>, <span class="var">bs</span>: <span class="ty">List</span>(<span class="ty">Nat</span>)): <a href="#L87"><span class="ty">Took</span></a> {
+<a class="ln" id="L189" href="#L189">189</a>  <a href="#L225"><span class="fn">took_head</span></a>(<span class="fn">Head::feed_fast</span>(h, bs))
+<a class="ln" id="L190" href="#L190">190</a>}
+<a class="ln" id="L191" href="#L191">191</a>
+<a class="ln" id="L192" href="#L192">192</a><span class="kw">fn</span> <span class="fn">head_rest</span>(<span class="var">f</span>: <span class="ty">Fed</span>(<span class="ty">RequestHead</span>)): <span class="ty">List</span>(<span class="ty">Nat</span>) {
+<a class="ln" id="L193" href="#L193">193</a>  <span class="kw">match</span> f {
+<a class="ln" id="L194" href="#L194">194</a>    <span class="ty">Fed::Mk</span>(s, out, rest) =&gt; rest
+<a class="ln" id="L195" href="#L195">195</a>  }
+<a class="ln" id="L196" href="#L196">196</a>}
+<a class="ln" id="L197" href="#L197">197</a>
+<a class="ln" id="L198" href="#L198">198</a><span class="com">// A new request's head read from the received bytes where they are: its lines</span>
+<a class="ln" id="L199" href="#L199">199</a><span class="com">// as positions (`Head::read_at_eq`), and the request read from them</span>
+<a class="ln" id="L200" href="#L200">200</a><span class="com">// (`request_at`), as `took_head(Head::feed_at(h, raw, 0, n))` reads it.</span>
+<a class="ln" id="L201" href="#L201">201</a><span class="kw">fn</span> <span class="fn">took_head_at</span>(<span class="var">h</span>: <span class="ty">RequestHead</span>, <span class="var">raw</span>: <span class="ty">Bytes</span>, <span class="var">n</span>: <span class="ty">Nat</span>): <a href="#L87"><span class="ty">Took</span></a> {
+<a class="ln" id="L202" href="#L202">202</a>  <span class="kw">match</span> h {
+<a class="ln" id="L203" href="#L203">203</a>    <span class="ty">HeadReading</span>(line, done, limit) =&gt; ⊢ <a href="#L87"><span class="ty">Took</span></a> <span class="kw">from</span> <span class="kw">match</span> line {
+<a class="ln" id="L204" href="#L204">204</a>      <span class="ty">Nil</span> =&gt; ⊢ <a href="#L87"><span class="ty">Took</span></a> <span class="kw">from</span> <span class="kw">match</span> done {
+<a class="ln" id="L205" href="#L205">205</a>        <span class="ty">Nil</span> =&gt; ⊢ <a href="#L87"><span class="ty">Took</span></a> <span class="kw">from</span> <span class="kw">match</span> <span class="fn">Head::read_at</span>(raw, <span class="num">0</span>, <span class="num">0</span>, <span class="kw">true</span>, <span class="kw">false</span>, <span class="ty">Nil</span>, limit, n) {
+<a class="ln" id="L206" href="#L206">206</a>          <span class="ty">AtRead</span>(spans, next, k) =&gt; <a href="#L180"><span class="fn">Head::parsed</span></a>(
+<a class="ln" id="L207" href="#L207">207</a>            <span class="fn">lines_at</span>(raw, <span class="fn">List::reverse</span>(spans)),
+<a class="ln" id="L208" href="#L208">208</a>            <a href="#L192"><span class="fn">head_rest</span></a>(<span class="fn">Head::feed_at</span>(<span class="ty">HeadRead</span>(<span class="ty">Nil</span>), raw, next, k))
+<a class="ln" id="L209" href="#L209">209</a>          )
+<a class="ln" id="L210" href="#L210">210</a>          <span class="ty">AtReading</span>(s, i, empty, blank, spans, left) =&gt; <a href="#L225"><span class="fn">took_head</span></a>(
+<a class="ln" id="L211" href="#L211">211</a>            <span class="fn">Head::at_fed</span>(raw, <span class="ty">AtReading</span>(s, i, empty, blank, spans, left))
+<a class="ln" id="L212" href="#L212">212</a>          )
+<a class="ln" id="L213" href="#L213">213</a>          <span class="ty">AtTooLong</span>(next, k) =&gt; <a href="#L225"><span class="fn">took_head</span></a>(<span class="fn">Head::at_fed</span>(raw, <span class="ty">AtTooLong</span>(next, k)))
+<a class="ln" id="L214" href="#L214">214</a>        }
+<a class="ln" id="L215" href="#L215">215</a>        <span class="ty">Cons</span>(d, ds) =&gt; <a href="#L225"><span class="fn">took_head</span></a>(<span class="fn">Head::feed_at</span>(h, raw, <span class="num">0</span>, n))
+<a class="ln" id="L216" href="#L216">216</a>      }
+<a class="ln" id="L217" href="#L217">217</a>      <span class="ty">Cons</span>(b, bs) =&gt; <a href="#L225"><span class="fn">took_head</span></a>(<span class="fn">Head::feed_at</span>(h, raw, <span class="num">0</span>, n))
+<a class="ln" id="L218" href="#L218">218</a>    }
+<a class="ln" id="L219" href="#L219">219</a>    <span class="ty">HeadRead</span>(ls) =&gt; <a href="#L225"><span class="fn">took_head</span></a>(<span class="fn">Head::feed_at</span>(h, raw, <span class="num">0</span>, n))
+<a class="ln" id="L220" href="#L220">220</a>    <span class="ty">HeadTooLong</span> =&gt; <a href="#L225"><span class="fn">took_head</span></a>(<span class="fn">Head::feed_at</span>(h, raw, <span class="num">0</span>, n))
+<a class="ln" id="L221" href="#L221">221</a>  }
+<a class="ln" id="L222" href="#L222">222</a>}
+<a class="ln" id="L223" href="#L223">223</a>
+<a class="ln" id="L224" href="#L224">224</a><span class="com">// What the head reader's result means for the request.</span>
+<a class="ln" id="L225" href="#L225">225</a><span class="kw">fn</span> <span class="fn">took_head</span>(<span class="var">f</span>: <span class="ty">Fed</span>(<span class="ty">RequestHead</span>)): <a href="#L87"><span class="ty">Took</span></a> {
+<a class="ln" id="L226" href="#L226">226</a>  <span class="kw">match</span> f {
+<a class="ln" id="L227" href="#L227">227</a>    <span class="ty">Fed::Mk</span>(s, out, rest) =&gt; ⊢ <a href="#L87"><span class="ty">Took</span></a> <span class="kw">from</span> <span class="kw">match</span> s {
+<a class="ln" id="L228" href="#L228">228</a>      <span class="ty">HeadReading</span>(line, done, limit) =&gt; <a href="#L89"><span class="ty">Wants</span></a>(<a href="#L78"><span class="ty">ReadingHead</span></a>(s))
+<a class="ln" id="L229" href="#L229">229</a>      <span class="ty">HeadRead</span>(ls) =&gt; <a href="#L180"><span class="fn">Head::parsed</span></a>(<span class="fn">parse_lines</span>(ls), rest)
+<a class="ln" id="L230" href="#L230">230</a>      <span class="ty">HeadTooLong</span> =&gt; <a href="#L93"><span class="ty">RefusedWith</span></a>(<span class="fn">Status::request_header_fields_too_large</span>())
+<a class="ln" id="L231" href="#L231">231</a>    }
+<a class="ln" id="L232" href="#L232">232</a>  }
+<a class="ln" id="L233" href="#L233">233</a>}
+<a class="ln" id="L234" href="#L234">234</a>
+<a class="ln" id="L235" href="#L235">235</a><span class="com">// The bytes that arrived next, wherever the request stands.</span>
+<a class="ln" id="L236" href="#L236">236</a><span class="kw">fn</span> <span class="fn">take</span>(<span class="var">rd</span>: <a href="#L77"><span class="ty">Reading</span></a>, <span class="var">bs</span>: <span class="ty">List</span>(<span class="ty">Nat</span>)): <a href="#L87"><span class="ty">Took</span></a> {
+<a class="ln" id="L237" href="#L237">237</a>  <span class="kw">match</span> rd {
+<a class="ln" id="L238" href="#L238">238</a>    <span class="ty">ReadingHead</span>(h) =&gt; <a href="#L188"><span class="fn">take_head</span></a>(h, bs)
+<a class="ln" id="L239" href="#L239">239</a>    <span class="ty">ReadingSized</span>(r, left, parts) =&gt; <a href="#L114"><span class="fn">take_sized</span></a>(r, left, parts, bs)
+<a class="ln" id="L240" href="#L240">240</a>    <span class="ty">ReadingChunks</span>(r, c, parts, size) =&gt; <a href="#L155"><span class="fn">take_chunks</span></a>(r, c, parts, size, bs)
+<a class="ln" id="L241" href="#L241">241</a>  }
+<a class="ln" id="L242" href="#L242">242</a>}
+<a class="ln" id="L243" href="#L243">243</a>
+<a class="ln" id="L244" href="#L244">244</a><span class="com">// The bytes sent, as they arrived, from the start of a connection.</span>
+<a class="ln" id="L245" href="#L245">245</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">take_all</span>(<span class="var">rd</span>: <a href="#L77"><span class="ty">Reading</span></a>, <span class="var">pieces</span>: <span class="ty">List</span>(<span class="ty">List</span>(<span class="ty">Nat</span>))): <a href="#L87"><span class="ty">Took</span></a> {
+<a class="ln" id="L246" href="#L246">246</a>  <span class="kw">match</span> pieces {
+<a class="ln" id="L247" href="#L247">247</a>    <span class="ty">Nil</span> =&gt; <a href="#L89"><span class="ty">Wants</span></a>(rd)
+<a class="ln" id="L248" href="#L248">248</a>    <span class="ty">Cons</span>(bs, more) =&gt; ⊢ <a href="#L87"><span class="ty">Took</span></a> <span class="kw">from</span> <span class="kw">match</span> <a href="#L236"><span class="fn">take</span></a>(rd, bs) {
+<a class="ln" id="L249" href="#L249">249</a>      <span class="ty">Wants</span>(rd2) =&gt; <a href="#L245"><span class="fn">take_all</span></a>(rd2, more)
+<a class="ln" id="L250" href="#L250">250</a>      <span class="ty">Whole</span>(r, rest) =&gt; <a href="#L91"><span class="ty">Whole</span></a>(r, rest)
+<a class="ln" id="L251" href="#L251">251</a>      <span class="ty">RefusedWith</span>(status) =&gt; <a href="#L93"><span class="ty">RefusedWith</span></a>(status)
+<a class="ln" id="L252" href="#L252">252</a>    }
+<a class="ln" id="L253" href="#L253">253</a>  }
+<a class="ln" id="L254" href="#L254">254</a>}
+<a class="ln" id="L255" href="#L255">255</a>
+<a class="ln" id="L256" href="#L256">256</a><span class="com">// The bytes on the wire to what was read, if anything was. The answer to</span>
+<a class="ln" id="L257" href="#L257">257</a><span class="com">// `HEAD` has no body, and every answer closes the connection.</span>
+<a class="ln" id="L258" href="#L258">258</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">answer_took</span>&lt;!e&gt;(<span class="var">f</span>: (<span class="ty">HttpRequest</span>) -&gt; <a href="../src/response.taut.html#L11"><span class="ty">Response</span></a> ! e, <span class="var">t</span>: <a href="#L87"><span class="ty">Took</span></a>): <span class="ty">Option</span>(<span class="ty">Bytes</span>) ! e {
+<a class="ln" id="L259" href="#L259">259</a>  <span class="kw">match</span> t {
+<a class="ln" id="L260" href="#L260">260</a>    <span class="ty">Wants</span>(rd) =&gt; <span class="ty">None</span>
+<a class="ln" id="L261" href="#L261">261</a>    <span class="ty">Whole</span>(r, rest) =&gt; <span class="ty">Some</span>(<a href="../src/response.taut.html#L127"><span class="fn">finish_response</span></a>(<a href="../src/response.taut.html#L106"><span class="fn">is_head</span></a>(r), <span class="kw">true</span>, <span class="fn">f</span>(r)))
+<a class="ln" id="L262" href="#L262">262</a>    <span class="ty">RefusedWith</span>(status) =&gt; <span class="ty">Some</span>(<a href="#L266"><span class="fn">refusal</span></a>(status))
+<a class="ln" id="L263" href="#L263">263</a>  }
+<a class="ln" id="L264" href="#L264">264</a>}
+<a class="ln" id="L265" href="#L265">265</a>
+<a class="ln" id="L266" href="#L266">266</a><span class="kw">fn</span> <span class="fn">refusal</span>(<span class="var">status</span>: <span class="ty">Status</span>): <span class="ty">Bytes</span> {
+<a class="ln" id="L267" href="#L267">267</a>  <a href="../src/response.taut.html#L127"><span class="fn">finish_response</span></a>(<span class="kw">false</span>, <span class="kw">true</span>, <a href="../src/response.taut.html#L17"><span class="fn">text_response</span></a>(status, <span class="fn">reason</span>(status)))
+<a class="ln" id="L268" href="#L268">268</a>}
+<a class="ln" id="L269" href="#L269">269</a>
+<a class="ln" id="L270" href="#L270">270</a><span class="com">// ---- the connection --------------------------------------------------------------------</span>
+<a class="ln" id="L271" href="#L271">271</a>
+<a class="ln" id="L272" href="#L272">272</a><span class="kw">fn</span> <span class="fn">nats</span>(<span class="var">bs</span>: <span class="ty">List</span>(u8)): <span class="ty">List</span>(<span class="ty">Nat</span>) {
+<a class="ln" id="L273" href="#L273">273</a>  <span class="fn">List::map</span>((<span class="var">b</span>: u8) =&gt; <span class="fn">Nat::of_u64</span>(<span class="fn">U64::of_u8</span>(b)), bs)
+<a class="ln" id="L274" href="#L274">274</a>}
+<a class="ln" id="L275" href="#L275">275</a>
+<a class="ln" id="L276" href="#L276">276</a><span class="com">// A connection given back with what was read from it: a read takes the</span>
+<a class="ln" id="L277" href="#L277">277</a><span class="com">// stream and gives it back.</span>
+<a class="ln" id="L278" href="#L278">278</a><span class="kw">pub(open)</span> <span class="kw">struct</span>(<span class="kw">affine</span>) <span class="ty">Got</span> { conn: <span class="ty">TcpStream</span>, took: <a href="#L87"><span class="ty">Took</span></a> }
+<a class="ln" id="L279" href="#L279">279</a>
+<a class="ln" id="L280" href="#L280">280</a><span class="com">// A connection given back with whether the write reached it.</span>
+<a class="ln" id="L281" href="#L281">281</a><span class="kw">struct</span>(<span class="kw">affine</span>) <span class="ty">Wrote</span> { conn: <span class="ty">TcpStream</span>, ok: <span class="ty">Bool</span> }
+<a class="ln" id="L282" href="#L282">282</a>
+<a class="ln" id="L283" href="#L283">283</a><span class="com">// Reads from `c` until the request is whole or cannot be read, starting from</span>
+<a class="ln" id="L284" href="#L284">284</a><span class="com">// `rd` (`reading_start()` for a new connection). A read that times out gives</span>
+<a class="ln" id="L285" href="#L285">285</a><span class="com">// `RefusedWith(408)`; `Wants` once the client stops sending or the read fails</span>
+<a class="ln" id="L286" href="#L286">286</a><span class="com">// for another reason.</span>
+<a class="ln" id="L287" href="#L287">287</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">read_request</span>(<span class="var">c</span>: <span class="ty">TcpStream</span>, <span class="var">rd</span>: <a href="#L77"><span class="ty">Reading</span></a>, <span class="var">deadline</span>: i64): <a href="#L278"><span class="ty">Got</span></a> ! {tcp_read, div} {
+<a class="ln" id="L288" href="#L288">288</a>  <span class="kw">match</span> <span class="kw">perform</span> <span class="fn">tcp_read</span>(c, <span class="num">16384</span>, <span class="ty">Some</span>(deadline)) {
+<a class="ln" id="L289" href="#L289">289</a>    <span class="ty">TcpRead</span> { stream, got } =&gt; <span class="kw">match</span> got {
+<a class="ln" id="L290" href="#L290">290</a>      <span class="ty">Err</span>(e) =&gt; <span class="ty">Got</span> {
+<a class="ln" id="L291" href="#L291">291</a>        conn: stream,
+<a class="ln" id="L292" href="#L292">292</a>        took: <span class="kw">match</span> e {
+<a class="ln" id="L293" href="#L293">293</a>          <span class="ty">TimedOut</span> =&gt; <a href="#L93"><span class="ty">RefusedWith</span></a>(<span class="fn">Status::request_timeout</span>())
+<a class="ln" id="L294" href="#L294">294</a>          <span class="ty">Denied</span>(m) =&gt; <a href="#L89"><span class="ty">Wants</span></a>(rd)
+<a class="ln" id="L295" href="#L295">295</a>          <span class="ty">Failed</span>(m) =&gt; <a href="#L89"><span class="ty">Wants</span></a>(rd)
+<a class="ln" id="L296" href="#L296">296</a>        }
+<a class="ln" id="L297" href="#L297">297</a>      }
+<a class="ln" id="L298" href="#L298">298</a>      <span class="ty">Ok</span>(raw) =&gt; <span class="kw">match</span> rd {
+<a class="ln" id="L299" href="#L299">299</a>        <span class="com">// The head is read from the received bytes where they are</span>
+<a class="ln" id="L300" href="#L300">300</a>        <span class="com">// (`Head::feed_at_eq`: the same as `take_head` on their list).</span>
+<a class="ln" id="L301" href="#L301">301</a>        <span class="ty">ReadingHead</span>(h) =&gt; <span class="kw">match</span> <span class="fn">Bytes::len</span>(raw) == <span class="num">0</span> {
+<a class="ln" id="L302" href="#L302">302</a>          <span class="kw">true</span> =&gt; <span class="ty">Got</span> { conn: stream, took: <a href="#L89"><span class="ty">Wants</span></a>(rd) }
+<a class="ln" id="L303" href="#L303">303</a>          <span class="kw">false</span> =&gt; <span class="kw">match</span> <a href="#L201"><span class="fn">took_head_at</span></a>(h, raw, <span class="fn">Nat::of_u64</span>(<span class="fn">Bytes::len</span>(raw))) {
+<a class="ln" id="L304" href="#L304">304</a>            <span class="ty">Wants</span>(rd2) =&gt; <a href="#L287"><span class="fn">read_request</span></a>(stream, rd2, deadline)
+<a class="ln" id="L305" href="#L305">305</a>            <span class="ty">Whole</span>(r, rest) =&gt; <span class="ty">Got</span> { conn: stream, took: <a href="#L91"><span class="ty">Whole</span></a>(r, rest) }
+<a class="ln" id="L306" href="#L306">306</a>            <span class="ty">RefusedWith</span>(status) =&gt; <span class="ty">Got</span> { conn: stream, took: <a href="#L93"><span class="ty">RefusedWith</span></a>(status) }
+<a class="ln" id="L307" href="#L307">307</a>          }
+<a class="ln" id="L308" href="#L308">308</a>        }
+<a class="ln" id="L309" href="#L309">309</a>        <span class="ty">ReadingSized</span>(r, left, parts) =&gt; <a href="#L316"><span class="fn">read_rest</span></a>(stream, rd, deadline, raw)
+<a class="ln" id="L310" href="#L310">310</a>        <span class="ty">ReadingChunks</span>(r, c, parts, size) =&gt; <a href="#L316"><span class="fn">read_rest</span></a>(stream, rd, deadline, raw)
+<a class="ln" id="L311" href="#L311">311</a>      }
+<a class="ln" id="L312" href="#L312">312</a>    }
+<a class="ln" id="L313" href="#L313">313</a>  }
+<a class="ln" id="L314" href="#L314">314</a>}
+<a class="ln" id="L315" href="#L315">315</a>
+<a class="ln" id="L316" href="#L316">316</a><span class="kw">fn</span> <span class="fn">read_rest</span>(<span class="var">c</span>: <span class="ty">TcpStream</span>, <span class="var">rd</span>: <a href="#L77"><span class="ty">Reading</span></a>, <span class="var">deadline</span>: i64, <span class="var">raw</span>: <span class="ty">Bytes</span>): <a href="#L278"><span class="ty">Got</span></a> ! {tcp_read, div} {
+<a class="ln" id="L317" href="#L317">317</a>  <span class="kw">match</span> <span class="fn">Bytes::to_list</span>(raw) {
+<a class="ln" id="L318" href="#L318">318</a>    <span class="ty">Nil</span> =&gt; <span class="ty">Got</span> { conn: c, took: <a href="#L89"><span class="ty">Wants</span></a>(rd) }
+<a class="ln" id="L319" href="#L319">319</a>    <span class="ty">Cons</span>(b, more) =&gt; <span class="kw">match</span> <a href="#L236"><span class="fn">take</span></a>(rd, <a href="#L272"><span class="fn">nats</span></a>(<span class="ty">Cons</span>(b, more))) {
+<a class="ln" id="L320" href="#L320">320</a>      <span class="ty">Wants</span>(rd2) =&gt; <a href="#L287"><span class="fn">read_request</span></a>(c, rd2, deadline)
+<a class="ln" id="L321" href="#L321">321</a>      <span class="ty">Whole</span>(r, rest) =&gt; <span class="ty">Got</span> { conn: c, took: <a href="#L91"><span class="ty">Whole</span></a>(r, rest) }
+<a class="ln" id="L322" href="#L322">322</a>      <span class="ty">RefusedWith</span>(status) =&gt; <span class="ty">Got</span> { conn: c, took: <a href="#L93"><span class="ty">RefusedWith</span></a>(status) }
+<a class="ln" id="L323" href="#L323">323</a>    }
+<a class="ln" id="L324" href="#L324">324</a>  }
+<a class="ln" id="L325" href="#L325">325</a>}
+<a class="ln" id="L326" href="#L326">326</a>
+<a class="ln" id="L327" href="#L327">327</a><span class="com">// How long a client has to send a request, or to take its response. Each</span>
+<a class="ln" id="L328" href="#L328">328</a><span class="com">// request on a connection gets this long again.</span>
+<a class="ln" id="L329" href="#L329">329</a><span class="kw">fn</span> <span class="fn">wait_ns</span>(): i64 {
+<a class="ln" id="L330" href="#L330">330</a>  <span class="num">10000000000</span>
+<a class="ln" id="L331" href="#L331">331</a>}
+<a class="ln" id="L332" href="#L332">332</a>
+<a class="ln" id="L333" href="#L333">333</a><span class="com">// How long (in milliseconds, as `sleep` takes) to wait before accepting again after</span>
+<a class="ln" id="L334" href="#L334">334</a><span class="com">// an accept fails for a reason other than being denied.</span>
+<a class="ln" id="L335" href="#L335">335</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">accept_retry_ms</span>(): u64 {
+<a class="ln" id="L336" href="#L336">336</a>  <span class="num">10</span>
+<a class="ln" id="L337" href="#L337">337</a>}
+<a class="ln" id="L338" href="#L338">338</a>
+<a class="ln" id="L339" href="#L339">339</a><span class="com">// The most connections served at once by `serve_response`; the next is accepted</span>
+<a class="ln" id="L340" href="#L340">340</a><span class="com">// once one closes. A connection waiting on a read holds a thread of the</span>
+<a class="ln" id="L341" href="#L341">341</a><span class="com">// host's pool for blocking work, so the limit bounds the threads a client</span>
+<a class="ln" id="L342" href="#L342">342</a><span class="com">// can make the server hold by opening connections and sending nothing.</span>
+<a class="ln" id="L343" href="#L343">343</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">connection_limit</span>(): u64 {
+<a class="ln" id="L344" href="#L344">344</a>  <span class="num">2048</span>
+<a class="ln" id="L345" href="#L345">345</a>}
+<a class="ln" id="L346" href="#L346">346</a>
+<a class="ln" id="L347" href="#L347">347</a><span class="com">// The most requests answered on one connection before it closes.</span>
+<a class="ln" id="L348" href="#L348">348</a><span class="kw">fn</span> <span class="fn">requests_per_connection</span>(): u64 {
+<a class="ln" id="L349" href="#L349">349</a>  <span class="num">1000</span>
+<a class="ln" id="L350" href="#L350">350</a>}
+<a class="ln" id="L351" href="#L351">351</a>
+<a class="ln" id="L352" href="#L352">352</a><span class="com">// Whether a `connection` value lists the `close` option (RFC 9110 7.6.1).</span>
+<a class="ln" id="L353" href="#L353">353</a><span class="kw">fn</span> <span class="fn">lists_close</span>(<span class="var">parts</span>: <span class="ty">List</span>(<span class="ty">List</span>(<span class="ty">Nat</span>))): <span class="ty">Bool</span> {
+<a class="ln" id="L354" href="#L354">354</a>  <span class="kw">match</span> parts {
+<a class="ln" id="L355" href="#L355">355</a>    <span class="ty">Nil</span> =&gt; <span class="kw">false</span>
+<a class="ln" id="L356" href="#L356">356</a>    <span class="ty">Cons</span>(p, more) =&gt; <span class="fn">bytes_eq_ci</span>(<a href="#L370"><span class="fn">trim_spaces</span></a>(p), <span class="fn">Text::bytes</span>(<span class="str">&quot;close&quot;</span>)) || <a href="#L353"><span class="fn">lists_close</span></a>(more)
+<a class="ln" id="L357" href="#L357">357</a>  }
+<a class="ln" id="L358" href="#L358">358</a>}
+<a class="ln" id="L359" href="#L359">359</a>
+<a class="ln" id="L360" href="#L360">360</a><span class="kw">fn</span> <span class="fn">drop_spaces</span>(<span class="var">l</span>: <span class="ty">List</span>(<span class="ty">Nat</span>)): <span class="ty">List</span>(<span class="ty">Nat</span>) {
+<a class="ln" id="L361" href="#L361">361</a>  <span class="kw">match</span> l {
+<a class="ln" id="L362" href="#L362">362</a>    <span class="ty">Nil</span> =&gt; <span class="ty">Nil</span>
+<a class="ln" id="L363" href="#L363">363</a>    <span class="ty">Cons</span>(b, more) =&gt; <span class="kw">match</span> b == <span class="num">32</span> || b == <span class="num">9</span> {
+<a class="ln" id="L364" href="#L364">364</a>      <span class="kw">true</span> =&gt; <a href="#L360"><span class="fn">drop_spaces</span></a>(more)
+<a class="ln" id="L365" href="#L365">365</a>      <span class="kw">false</span> =&gt; l
+<a class="ln" id="L366" href="#L366">366</a>    }
+<a class="ln" id="L367" href="#L367">367</a>  }
+<a class="ln" id="L368" href="#L368">368</a>}
+<a class="ln" id="L369" href="#L369">369</a>
+<a class="ln" id="L370" href="#L370">370</a><span class="kw">fn</span> <span class="fn">trim_spaces</span>(<span class="var">l</span>: <span class="ty">List</span>(<span class="ty">Nat</span>)): <span class="ty">List</span>(<span class="ty">Nat</span>) {
+<a class="ln" id="L371" href="#L371">371</a>  <span class="fn">List::reverse</span>(<a href="#L360"><span class="fn">drop_spaces</span></a>(<span class="fn">List::reverse</span>(<a href="#L360"><span class="fn">drop_spaces</span></a>(l))))
+<a class="ln" id="L372" href="#L372">372</a>}
+<a class="ln" id="L373" href="#L373">373</a>
+<a class="ln" id="L374" href="#L374">374</a><span class="kw">fn</span> <span class="fn">split_parts</span>(<span class="var">o</span>: <span class="ty">List</span>(<span class="ty">List</span>(<span class="ty">Nat</span>)) × <span class="ty">List</span>(<span class="ty">Nat</span>)): <span class="ty">List</span>(<span class="ty">List</span>(<span class="ty">Nat</span>)) {
+<a class="ln" id="L375" href="#L375">375</a>  <span class="kw">match</span> o {
+<a class="ln" id="L376" href="#L376">376</a>    #(parts, last) =&gt; <span class="ty">Cons</span>(last, parts)
+<a class="ln" id="L377" href="#L377">377</a>  }
+<a class="ln" id="L378" href="#L378">378</a>}
+<a class="ln" id="L379" href="#L379">379</a>
+<a class="ln" id="L380" href="#L380">380</a><span class="com">// Whether any of the `connection` values lists `close`.</span>
+<a class="ln" id="L381" href="#L381">381</a><span class="kw">fn</span> <span class="fn">any_lists_close</span>(<span class="var">vs</span>: <span class="ty">List</span>(<span class="ty">Text</span>)): <span class="ty">Bool</span> {
+<a class="ln" id="L382" href="#L382">382</a>  <span class="kw">match</span> vs {
+<a class="ln" id="L383" href="#L383">383</a>    <span class="ty">Nil</span> =&gt; <span class="kw">false</span>
+<a class="ln" id="L384" href="#L384">384</a>    <span class="ty">Cons</span>(v, more) =&gt; <a href="#L353"><span class="fn">lists_close</span></a>(
+<a class="ln" id="L385" href="#L385">385</a>      <a href="#L374"><span class="fn">split_parts</span></a>(<span class="fn">Bytes::split</span>(<span class="fn">Text::bytes</span>(v), <span class="num">44</span>))
+<a class="ln" id="L386" href="#L386">386</a>    ) || <a href="#L381"><span class="fn">any_lists_close</span></a>(more)
+<a class="ln" id="L387" href="#L387">387</a>  }
+<a class="ln" id="L388" href="#L388">388</a>}
+<a class="ln" id="L389" href="#L389">389</a>
+<a class="ln" id="L390" href="#L390">390</a><span class="com">// Whether the client asked to close the connection after this request: any of its</span>
+<a class="ln" id="L391" href="#L391">391</a><span class="com">// `connection` headers, not only the first, lists `close`.</span>
+<a class="ln" id="L392" href="#L392">392</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">asks_close</span>(<span class="var">r</span>: <span class="ty">HttpRequest</span>): <span class="ty">Bool</span> {
+<a class="ln" id="L393" href="#L393">393</a>  <a href="#L381"><span class="fn">any_lists_close</span></a>(<span class="fn">HttpRequest::header_all</span>(r, <span class="str">&quot;connection&quot;</span>))
+<a class="ln" id="L394" href="#L394">394</a>}
+<a class="ln" id="L395" href="#L395">395</a>
+<a class="ln" id="L396" href="#L396">396</a><span class="com">// When a read or a write that starts now gives up. A clock too near the end</span>
+<a class="ln" id="L397" href="#L397">397</a><span class="com">// of `i64` to add the wait to gives up at once.</span>
+<a class="ln" id="L398" href="#L398">398</a><span class="kw">fn</span> <span class="fn">deadline</span>(): i64 ! {monotonic_clock} {
+<a class="ln" id="L399" href="#L399">399</a>  <span class="kw">let</span> now := <span class="kw">perform</span> <span class="fn">monotonic_clock</span>()
+<a class="ln" id="L400" href="#L400">400</a>  <span class="kw">handle</span> { now + <a href="#L329"><span class="fn">wait_ns</span></a>() } <span class="kw">with</span> { <span class="fn">overflow</span>() =&gt; now }
+<a class="ln" id="L401" href="#L401">401</a>}
+<a class="ln" id="L402" href="#L402">402</a>
+<a class="ln" id="L403" href="#L403">403</a><span class="kw">fn</span> <span class="fn">finish</span>(<span class="var">c</span>: <span class="ty">TcpStream</span>): <span class="ty">Unit</span> ! {tcp_shutdown, tcp_close} {
+<a class="ln" id="L404" href="#L404">404</a>  <span class="kw">match</span> <span class="kw">perform</span> <span class="fn">tcp_shutdown</span>(<span class="fn">TcpStream::stopper</span>(&amp;c), <span class="ty">ShutdownWrite</span>) {
+<a class="ln" id="L405" href="#L405">405</a>    <span class="ty">Ok</span>(v) =&gt; #()
+<a class="ln" id="L406" href="#L406">406</a>    <span class="ty">Err</span>(e) =&gt; #()
+<a class="ln" id="L407" href="#L407">407</a>  }
+<a class="ln" id="L408" href="#L408">408</a>  <span class="kw">perform</span> <span class="fn">tcp_close</span>(c)
+<a class="ln" id="L409" href="#L409">409</a>}
+<a class="ln" id="L410" href="#L410">410</a>
+<a class="ln" id="L411" href="#L411">411</a><span class="com">// The next request on a connection: what is left of the bytes already</span>
+<a class="ln" id="L412" href="#L412">412</a><span class="com">// received, then what arrives.</span>
+<a class="ln" id="L413" href="#L413">413</a><span class="kw">fn</span> <span class="fn">next_request</span>(<span class="var">c</span>: <span class="ty">TcpStream</span>, <span class="var">rest</span>: <span class="ty">List</span>(<span class="ty">Nat</span>)): <a href="#L278"><span class="ty">Got</span></a> ! {tcp_read, monotonic_clock, div} {
+<a class="ln" id="L414" href="#L414">414</a>  <span class="kw">let</span> deadline := <a href="#L398"><span class="fn">deadline</span></a>()
+<a class="ln" id="L415" href="#L415">415</a>  <span class="kw">match</span> rest {
+<a class="ln" id="L416" href="#L416">416</a>    <span class="ty">Nil</span> =&gt; <a href="#L287"><span class="fn">read_request</span></a>(c, <a href="#L96"><span class="fn">reading_start</span></a>(), deadline)
+<a class="ln" id="L417" href="#L417">417</a>    <span class="ty">Cons</span>(b, more) =&gt; <span class="kw">match</span> <a href="#L236"><span class="fn">take</span></a>(<a href="#L96"><span class="fn">reading_start</span></a>(), rest) {
+<a class="ln" id="L418" href="#L418">418</a>      <span class="ty">Wants</span>(rd) =&gt; <a href="#L287"><span class="fn">read_request</span></a>(c, rd, deadline)
+<a class="ln" id="L419" href="#L419">419</a>      <span class="ty">Whole</span>(r, rest2) =&gt; <span class="ty">Got</span> { conn: c, took: <a href="#L91"><span class="ty">Whole</span></a>(r, rest2) }
+<a class="ln" id="L420" href="#L420">420</a>      <span class="ty">RefusedWith</span>(status) =&gt; <span class="ty">Got</span> { conn: c, took: <a href="#L93"><span class="ty">RefusedWith</span></a>(status) }
+<a class="ln" id="L421" href="#L421">421</a>    }
+<a class="ln" id="L422" href="#L422">422</a>  }
+<a class="ln" id="L423" href="#L423">423</a>}
+<a class="ln" id="L424" href="#L424">424</a>
+<a class="ln" id="L425" href="#L425">425</a><span class="kw">fn</span> <span class="fn">write_bytes</span>(<span class="var">c</span>: <span class="ty">TcpStream</span>, <span class="var">b</span>: <span class="ty">Bytes</span>): <a href="#L281"><span class="ty">Wrote</span></a> ! {tcp_write, monotonic_clock, stderr} {
+<a class="ln" id="L426" href="#L426">426</a>  <span class="kw">match</span> <span class="kw">perform</span> <span class="fn">tcp_write</span>(c, b, <span class="ty">Some</span>(<a href="#L398"><span class="fn">deadline</span></a>())) {
+<a class="ln" id="L427" href="#L427">427</a>    <span class="ty">TcpWritten</span> { stream, result } =&gt; <span class="kw">match</span> result {
+<a class="ln" id="L428" href="#L428">428</a>      <span class="ty">Ok</span>(u) =&gt; <span class="ty">Wrote</span> { conn: stream, ok: <span class="kw">true</span> }
+<a class="ln" id="L429" href="#L429">429</a>      <span class="ty">Err</span>(e) =&gt; {
+<a class="ln" id="L430" href="#L430">430</a>        <span class="kw">perform</span> <span class="fn">stderr</span>(<span class="fn">io_message</span>(e))
+<a class="ln" id="L431" href="#L431">431</a>        <span class="ty">Wrote</span> { conn: stream, ok: <span class="kw">false</span> }
+<a class="ln" id="L432" href="#L432">432</a>      }
+<a class="ln" id="L433" href="#L433">433</a>    }
+<a class="ln" id="L434" href="#L434">434</a>  }
+<a class="ln" id="L435" href="#L435">435</a>}
+<a class="ln" id="L436" href="#L436">436</a>
+<a class="ln" id="L437" href="#L437">437</a><span class="com">// What serving one connection asks of the host, besides what the handler asks.</span>
+<a class="ln" id="L438" href="#L438">438</a><span class="kw">pub</span> <span class="kw">effect</span> <span class="ty">ConnIo</span> {
+<a class="ln" id="L439" href="#L439">439</a>  div,
+<a class="ln" id="L440" href="#L440">440</a>  monotonic_clock,
+<a class="ln" id="L441" href="#L441">441</a>  stderr,
+<a class="ln" id="L442" href="#L442">442</a>  mutex_claim,
+<a class="ln" id="L443" href="#L443">443</a>  mutex_new,
+<a class="ln" id="L444" href="#L444">444</a>  mutex_take_claimed,
+<a class="ln" id="L445" href="#L445">445</a>  tcp_close,
+<a class="ln" id="L446" href="#L446">446</a>  tcp_read,
+<a class="ln" id="L447" href="#L447">447</a>  tcp_shutdown,
+<a class="ln" id="L448" href="#L448">448</a>  tcp_write,
+<a class="ln" id="L449" href="#L449">449</a>  wait
+<a class="ln" id="L450" href="#L450">450</a>}
+<a class="ln" id="L451" href="#L451">451</a>
+<a class="ln" id="L452" href="#L452">452</a><span class="com">// What a task that serves one connection asks of the host: the connection, and</span>
+<a class="ln" id="L453" href="#L453">453</a><span class="com">// the semaphore it gives back.</span>
+<a class="ln" id="L454" href="#L454">454</a><span class="kw">pub</span> <span class="kw">effect</span> <span class="ty">TaskIo</span> {
+<a class="ln" id="L455" href="#L455">455</a>  <span class="ty">ConnIo</span>,
+<a class="ln" id="L456" href="#L456">456</a>  mutex_put
+<a class="ln" id="L457" href="#L457">457</a>}
+<a class="ln" id="L458" href="#L458">458</a>
+<a class="ln" id="L459" href="#L459">459</a><span class="com">// What `serve_response` asks of the host itself, besides what the tasks and the</span>
+<a class="ln" id="L460" href="#L460">460</a><span class="com">// handler ask: it listens, accepts, waits for a free slot, and starts the tasks.</span>
+<a class="ln" id="L461" href="#L461">461</a><span class="kw">pub</span> <span class="kw">effect</span> <span class="ty">ServeIo</span> {
+<a class="ln" id="L462" href="#L462">462</a>  <span class="ty">TaskIo</span>,
+<a class="ln" id="L463" href="#L463">463</a>  sleep,
+<a class="ln" id="L464" href="#L464">464</a>  stderr,
+<a class="ln" id="L465" href="#L465">465</a>  tcp_accept,
+<a class="ln" id="L466" href="#L466">466</a>  tcp_listen
+<a class="ln" id="L467" href="#L467">467</a>}
+<a class="ln" id="L468" href="#L468">468</a>
+<a class="ln" id="L469" href="#L469">469</a><span class="com">// One connection, answered by `f`: its requests one after another, up to `left`.</span>
+<a class="ln" id="L470" href="#L470">470</a><span class="kw">fn</span> <span class="fn">answer_conn</span>&lt;!h: <span class="ty">Host</span>&gt;(
+<a class="ln" id="L471" href="#L471">471</a>  <span class="var">c</span>: <span class="ty">TcpStream</span>,
+<a class="ln" id="L472" href="#L472">472</a>  <span class="var">f</span>: (<span class="ty">HttpRequest</span>) -&gt; <a href="../src/response.taut.html#L11"><span class="ty">Response</span></a> ! h,
+<a class="ln" id="L473" href="#L473">473</a>  <span class="var">rest</span>: <span class="ty">List</span>(<span class="ty">Nat</span>),
+<a class="ln" id="L474" href="#L474">474</a>  <span class="var">left</span>: u64
+<a class="ln" id="L475" href="#L475">475</a>): <span class="ty">Unit</span> ! {<span class="ty">ConnIo</span>} ∪ h {
+<a class="ln" id="L476" href="#L476">476</a>  <span class="kw">match</span> <a href="#L413"><span class="fn">next_request</span></a>(c, rest) {
+<a class="ln" id="L477" href="#L477">477</a>    <span class="ty">Got</span> { conn, took } =&gt; <span class="kw">match</span> took {
+<a class="ln" id="L478" href="#L478">478</a>      <span class="ty">Wants</span>(rd) =&gt; <a href="#L403"><span class="fn">finish</span></a>(conn)
+<a class="ln" id="L479" href="#L479">479</a>      <span class="ty">RefusedWith</span>(status) =&gt; <span class="kw">match</span> <a href="#L425"><span class="fn">write_bytes</span></a>(conn, <a href="#L266"><span class="fn">refusal</span></a>(status)) {
+<a class="ln" id="L480" href="#L480">480</a>        <span class="ty">Wrote</span> { conn, ok } =&gt; <a href="#L403"><span class="fn">finish</span></a>(conn)
+<a class="ln" id="L481" href="#L481">481</a>      }
+<a class="ln" id="L482" href="#L482">482</a>      <span class="ty">Whole</span>(r, rest2) =&gt; {
+<a class="ln" id="L483" href="#L483">483</a>        <span class="kw">let</span> last := <a href="#L392"><span class="fn">asks_close</span></a>(r) || left &lt;= <span class="num">1</span>
+<a class="ln" id="L484" href="#L484">484</a>        <span class="com">// The connection waits in a mutex while `f` runs: `f` may resume more than</span>
+<a class="ln" id="L485" href="#L485">485</a>        <span class="com">// once, and a connection may not be held across that.</span>
+<a class="ln" id="L486" href="#L486">486</a>        <span class="kw">let</span> parked := <span class="kw">perform</span> <span class="fn">mutex_new</span>(conn)
+<a class="ln" id="L487" href="#L487">487</a>        <span class="kw">let</span> bytes := <a href="../src/response.taut.html#L127"><span class="fn">finish_response</span></a>(<a href="../src/response.taut.html#L106"><span class="fn">is_head</span></a>(r), last, <span class="fn">f</span>(r))
+<a class="ln" id="L488" href="#L488">488</a>        <span class="kw">match</span> <a href="#L425"><span class="fn">write_bytes</span></a>(<span class="fn">Mutex::take</span>(parked), bytes) {
+<a class="ln" id="L489" href="#L489">489</a>          <span class="ty">Wrote</span> { conn, ok } =&gt; <span class="kw">match</span> ok &amp;&amp; <span class="fn">not</span>(last) {
+<a class="ln" id="L490" href="#L490">490</a>            <span class="kw">true</span> =&gt; <a href="#L470"><span class="fn">answer_conn</span></a>(conn, f, rest2, <span class="kw">handle</span> { left - <span class="num">1</span> } <span class="kw">with</span> { <span class="fn">overflow</span>() =&gt; <span class="num">0</span> })
+<a class="ln" id="L491" href="#L491">491</a>            <span class="kw">false</span> =&gt; <a href="#L403"><span class="fn">finish</span></a>(conn)
+<a class="ln" id="L492" href="#L492">492</a>          }
+<a class="ln" id="L493" href="#L493">493</a>        }
+<a class="ln" id="L494" href="#L494">494</a>      }
+<a class="ln" id="L495" href="#L495">495</a>    }
+<a class="ln" id="L496" href="#L496">496</a>  }
+<a class="ln" id="L497" href="#L497">497</a>}
+<a class="ln" id="L498" href="#L498">498</a>
+<a class="ln" id="L499" href="#L499">499</a><span class="kw">fn</span> <span class="fn">answer_loop</span>&lt;!h: <span class="ty">Host</span>&gt;(
+<a class="ln" id="L500" href="#L500">500</a>  <span class="var">l</span>: <span class="ty">TcpListener</span>,
+<a class="ln" id="L501" href="#L501">501</a>  <span class="var">f</span>: (<span class="ty">HttpRequest</span>) -&gt; <a href="../src/response.taut.html#L11"><span class="ty">Response</span></a> ! h,
+<a class="ln" id="L502" href="#L502">502</a>  <span class="var">slots</span>: <span class="ty">Semaphore</span>
+<a class="ln" id="L503" href="#L503">503</a>): <span class="ty">Unit</span> ! {<span class="ty">ServeIo</span>, <span class="kw">∀</span> <span class="ty">T</span>. <span class="fn">spawn</span>(() -&gt; <span class="ty">T</span> ! {<span class="ty">TaskIo</span>} ∪ h)} ∪ h {
+<a class="ln" id="L504" href="#L504">504</a>  <span class="fn">Semaphore::acquire</span>(slots)
+<a class="ln" id="L505" href="#L505">505</a>  <span class="kw">match</span> <span class="kw">perform</span> <span class="fn">tcp_accept</span>(l, <span class="ty">None</span>) {
+<a class="ln" id="L506" href="#L506">506</a>    <span class="ty">TcpAccepted</span> { listener, got } =&gt; <span class="kw">match</span> got {
+<a class="ln" id="L507" href="#L507">507</a>      <span class="ty">Err</span>(<span class="ty">Denied</span>(m2)) =&gt; <span class="kw">perform</span> <span class="fn">stderr</span>(<span class="fn">concat</span>(m2, <span class="str">&quot;\n&quot;</span>))
+<a class="ln" id="L508" href="#L508">508</a>      <span class="ty">Err</span>(e) =&gt; {
+<a class="ln" id="L509" href="#L509">509</a>        <span class="fn">Semaphore::release</span>(slots)
+<a class="ln" id="L510" href="#L510">510</a>        <span class="kw">perform</span> <span class="fn">stderr</span>(<span class="fn">concat</span>(<span class="fn">io_message</span>(e), <span class="str">&quot;\n&quot;</span>))
+<a class="ln" id="L511" href="#L511">511</a>        <span class="kw">perform</span> <span class="fn">sleep</span>(<a href="#L335"><span class="fn">accept_retry_ms</span></a>())
+<a class="ln" id="L512" href="#L512">512</a>        <a href="#L499"><span class="fn">answer_loop</span></a>(listener, f, slots)
+<a class="ln" id="L513" href="#L513">513</a>      }
+<a class="ln" id="L514" href="#L514">514</a>      <span class="ty">Ok</span>(c) =&gt; {
+<a class="ln" id="L515" href="#L515">515</a>        <span class="fn">Task::detach</span>(<span class="kw">perform</span> <span class="fn">spawn</span>(() =&gt; {
+<a class="ln" id="L516" href="#L516">516</a>          <a href="#L470"><span class="fn">answer_conn</span></a>(c, f, <span class="ty">Nil</span>, <a href="#L348"><span class="fn">requests_per_connection</span></a>())
+<a class="ln" id="L517" href="#L517">517</a>          <span class="fn">Semaphore::release</span>(slots)
+<a class="ln" id="L518" href="#L518">518</a>        }))
+<a class="ln" id="L519" href="#L519">519</a>        <a href="#L499"><span class="fn">answer_loop</span></a>(listener, f, slots)
+<a class="ln" id="L520" href="#L520">520</a>      }
+<a class="ln" id="L521" href="#L521">521</a>    }
+<a class="ln" id="L522" href="#L522">522</a>  }
+<a class="ln" id="L523" href="#L523">523</a>}
+<a class="ln" id="L524" href="#L524">524</a>
+<a class="ln" id="L525" href="#L525">525</a><span class="com">// Listen on `address` and answer each request with `f`. Connections are</span>
+<a class="ln" id="L526" href="#L526">526</a><span class="com">// served at once, each in a task, at most `connection_limit()` of them; the</span>
+<a class="ln" id="L527" href="#L527">527</a><span class="com">// next is accepted once one closes. They stay open for further requests</span>
+<a class="ln" id="L528" href="#L528">528</a><span class="com">// (HTTP/1.1 persistent connections) until the client closes or asks to</span>
+<a class="ln" id="L529" href="#L529">529</a><span class="com">// close, or is idle past `wait_ns`. The handler's state is an effect it</span>
+<a class="ln" id="L530" href="#L530">530</a><span class="com">// performs, not a value this loop holds. Stops when listening fails or</span>
+<a class="ln" id="L531" href="#L531">531</a><span class="com">// accepting is not permitted.</span>
+<a class="ln" id="L532" href="#L532">532</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">serve_response</span>&lt;!h: <span class="ty">Host</span>&gt;(
+<a class="ln" id="L533" href="#L533">533</a>  <span class="var">address</span>: <span class="ty">Text</span>,
+<a class="ln" id="L534" href="#L534">534</a>  <span class="var">f</span>: (<span class="ty">HttpRequest</span>) -&gt; <a href="../src/response.taut.html#L11"><span class="ty">Response</span></a> ! h
+<a class="ln" id="L535" href="#L535">535</a>): <span class="ty">Unit</span> ! {<span class="ty">ServeIo</span>, <span class="kw">∀</span> <span class="ty">T</span>. <span class="fn">spawn</span>(() -&gt; <span class="ty">T</span> ! {<span class="ty">TaskIo</span>} ∪ h)} ∪ h {
+<a class="ln" id="L536" href="#L536">536</a>  <span class="kw">match</span> <span class="kw">perform</span> <span class="fn">tcp_listen</span>(address) {
+<a class="ln" id="L537" href="#L537">537</a>    <span class="ty">Err</span>(e) =&gt; <span class="kw">perform</span> <span class="fn">stderr</span>(<span class="fn">io_message</span>(e))
+<a class="ln" id="L538" href="#L538">538</a>    <span class="ty">Ok</span>(l) =&gt; {
+<a class="ln" id="L539" href="#L539">539</a>      <span class="kw">perform</span> <span class="fn">stderr</span>(<span class="fn">concat</span>(<span class="str">&quot;listening on &quot;</span>, <span class="fn">TcpListener::address</span>(&amp;l)))
+<a class="ln" id="L540" href="#L540">540</a>      <a href="#L499"><span class="fn">answer_loop</span></a>(l, f, <span class="fn">Semaphore::new</span>(<a href="#L343"><span class="fn">connection_limit</span></a>()))
+<a class="ln" id="L541" href="#L541">541</a>    }
+<a class="ln" id="L542" href="#L542">542</a>  }
+<a class="ln" id="L543" href="#L543">543</a>}
+</code></pre>
+</html>

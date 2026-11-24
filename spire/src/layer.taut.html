@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>src/layer.taut</title><style>:root{color-scheme:light dark;--bg:#fff;--fg:#1f2328;--mut:#6e7781;--kw:#cf222e;--str:#0a3069;--num:#0550ae;--com:#6e7781;--mac:#8250df;--ty:#953800;--fn:#6639ba;--var:#116329;--op:#0550ae;--link:#0969da;--sel:#fff8c5}@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--mut:#7d8590;--kw:#ff7b72;--str:#a5d6ff;--num:#79c0ff;--com:#8b949e;--mac:#d2a8ff;--ty:#ffa657;--fn:#d2a8ff;--var:#7ee787;--op:#79c0ff;--link:#58a6ff;--sel:#3a3000}}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,sans-serif}nav,main{padding:8px 16px}a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}pre{margin:0;padding:8px 0;font:13px/1.5 ui-monospace,monospace;overflow-x:auto}pre a{color:inherit}pre a[href^="#"],pre a[href*=".html"]{text-decoration:underline dotted}.ln{display:inline-block;width:5ch;margin-right:2ch;text-align:right;color:var(--mut);user-select:none;text-decoration:none!important}.ln:target{background:var(--sel)}.kw{color:var(--kw)}.str{color:var(--str)}.num{color:var(--num)}.com{color:var(--com)}.mac{color:var(--mac)}.ty{color:var(--ty)}.fn{color:var(--fn)}.var{color:var(--var)}.op{color:var(--op)}ul{list-style:none;padding-left:0}li li{padding-left:2ch}.kind{color:var(--mut)}</style>
+<nav><a href="../index.html">index</a> / src/layer.taut</nav>
+<pre><code><a class="ln" id="L1" href="#L1">1</a><span class="com">// A layer wraps one service in another. For the middleware here `A` and `B`</span>
+<a class="ln" id="L2" href="#L2">2</a><span class="com">// are service types, `Service(S, Req, Res, E)` to `Service(S2, Req2, Res2, E2)`,</span>
+<a class="ln" id="L3" href="#L3">3</a><span class="com">// but composing layers does not look inside them.</span>
+<a class="ln" id="L4" href="#L4">4</a><span class="kw">pub(open)</span> <span class="kw">inductive</span> <span class="ty">Layer</span>(<span class="ty">A</span>: <span class="ty">Type</span>, <span class="ty">B</span>: <span class="ty">Type</span>): <span class="ty">Type</span> {
+<a class="ln" id="L5" href="#L5">5</a>  <span class="ty">Mk</span>(<span class="var">wrap</span>: (<span class="ty">A</span>) -&gt; <span class="ty">B</span>): <a href="#L4"><span class="ty">Layer</span></a>(<span class="ty">A</span>, <span class="ty">B</span>)
+<a class="ln" id="L6" href="#L6">6</a>}
+<a class="ln" id="L7" href="#L7">7</a>
+<a class="ln" id="L8" href="#L8">8</a><span class="kw">pub</span> <span class="kw">module</span> <span class="ty">Layer</span> {
+<a class="ln" id="L9" href="#L9">9</a>  <span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">apply</span>&lt;<span class="ty">A</span>, <span class="ty">B</span>&gt;(<span class="var">l</span>: <a href="#L4"><span class="ty">Layer</span></a>(<span class="ty">A</span>, <span class="ty">B</span>), <span class="var">a</span>: <span class="ty">A</span>): <span class="ty">B</span> {
+<a class="ln" id="L10" href="#L10">10</a>    <span class="kw">match</span> l {
+<a class="ln" id="L11" href="#L11">11</a>      <span class="ty">Mk</span>(w) =&gt; <span class="fn">w</span>(a)
+<a class="ln" id="L12" href="#L12">12</a>    }
+<a class="ln" id="L13" href="#L13">13</a>  }
+<a class="ln" id="L14" href="#L14">14</a>
+<a class="ln" id="L15" href="#L15">15</a>  <span class="com">// `inner` first, then `outer` around it.</span>
+<a class="ln" id="L16" href="#L16">16</a>  <span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">then</span>&lt;<span class="ty">A</span>, <span class="ty">B</span>, <span class="ty">C</span>&gt;(<span class="var">inner</span>: <a href="#L4"><span class="ty">Layer</span></a>(<span class="ty">A</span>, <span class="ty">B</span>), <span class="var">outer</span>: <a href="#L4"><span class="ty">Layer</span></a>(<span class="ty">B</span>, <span class="ty">C</span>)): <a href="#L4"><span class="ty">Layer</span></a>(<span class="ty">A</span>, <span class="ty">C</span>) {
+<a class="ln" id="L17" href="#L17">17</a>    <a href="#L5"><span class="ty">Layer::Mk</span></a>((<span class="var">a</span>: <span class="ty">A</span>) =&gt; <a href="#L9"><span class="fn">Layer::apply</span></a>(outer, <a href="#L9"><span class="fn">Layer::apply</span></a>(inner, a)))
+<a class="ln" id="L18" href="#L18">18</a>  }
+<a class="ln" id="L19" href="#L19">19</a>
+<a class="ln" id="L20" href="#L20">20</a>  <span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">identity</span>&lt;<span class="ty">A</span>&gt;(): <a href="#L4"><span class="ty">Layer</span></a>(<span class="ty">A</span>, <span class="ty">A</span>) {
+<a class="ln" id="L21" href="#L21">21</a>    <a href="#L5"><span class="ty">Layer::Mk</span></a>((<span class="var">a</span>: <span class="ty">A</span>) =&gt; a)
+<a class="ln" id="L22" href="#L22">22</a>  }
+<a class="ln" id="L23" href="#L23">23</a>
+<a class="ln" id="L24" href="#L24">24</a>  <span class="com">// A layer is the same as rebuilding it from its wrap.</span>
+<a class="ln" id="L25" href="#L25">25</a>  <span class="kw">theorem</span> <span class="fn">eta</span>&lt;<span class="ty">A</span>: <span class="ty">Type</span>, <span class="ty">B</span>: <span class="ty">Type</span>&gt;(<span class="var">l</span>: <span class="ty">Layer</span>(<span class="ty">A</span>, <span class="ty">B</span>)): <span class="ty">Layer::Mk</span>((<span class="var">a</span>: <span class="ty">A</span>) =&gt; <span class="fn">Layer::apply</span>(l, a)) = l {
+<a class="ln" id="L26" href="#L26">26</a>    <span class="kw">match</span> l {
+<a class="ln" id="L27" href="#L27">27</a>      <span class="ty">Mk</span>(w) =&gt; <span class="ty">Refl</span>
+<a class="ln" id="L28" href="#L28">28</a>    }
+<a class="ln" id="L29" href="#L29">29</a>  }
+<a class="ln" id="L30" href="#L30">30</a>
+<a class="ln" id="L31" href="#L31">31</a>  <span class="kw">pub</span> <span class="kw">theorem</span> <span class="fn">then_assoc</span>&lt;<span class="ty">A</span>: <span class="ty">Type</span>, <span class="ty">B</span>: <span class="ty">Type</span>, <span class="ty">C</span>: <span class="ty">Type</span>, <span class="ty">D</span>: <span class="ty">Type</span>&gt;(
+<a class="ln" id="L32" href="#L32">32</a>    <span class="var">f</span>: <span class="ty">Layer</span>(<span class="ty">A</span>, <span class="ty">B</span>),
+<a class="ln" id="L33" href="#L33">33</a>    <span class="var">g</span>: <span class="ty">Layer</span>(<span class="ty">B</span>, <span class="ty">C</span>),
+<a class="ln" id="L34" href="#L34">34</a>    <span class="var">h</span>: <span class="ty">Layer</span>(<span class="ty">C</span>, <span class="ty">D</span>)
+<a class="ln" id="L35" href="#L35">35</a>  ): <span class="fn">Layer::then</span>(<span class="fn">Layer::then</span>(f, g), h) = <span class="fn">Layer::then</span>(f, <span class="fn">Layer::then</span>(g, h)) {
+<a class="ln" id="L36" href="#L36">36</a>    <span class="ty">Refl</span>
+<a class="ln" id="L37" href="#L37">37</a>  }
+<a class="ln" id="L38" href="#L38">38</a>
+<a class="ln" id="L39" href="#L39">39</a>  <span class="kw">pub</span> <span class="kw">theorem</span> <span class="fn">identity_left</span>&lt;<span class="ty">A</span>: <span class="ty">Type</span>, <span class="ty">B</span>: <span class="ty">Type</span>&gt;(
+<a class="ln" id="L40" href="#L40">40</a>    <span class="var">f</span>: <span class="ty">Layer</span>(<span class="ty">A</span>, <span class="ty">B</span>)
+<a class="ln" id="L41" href="#L41">41</a>  ): <span class="fn">Layer::then</span>(<span class="fn">Layer::identity</span>(), f) = f {
+<a class="ln" id="L42" href="#L42">42</a>    <span class="fn">Layer::eta</span>(f)
+<a class="ln" id="L43" href="#L43">43</a>  }
+<a class="ln" id="L44" href="#L44">44</a>
+<a class="ln" id="L45" href="#L45">45</a>  <span class="kw">pub</span> <span class="kw">theorem</span> <span class="fn">identity_right</span>&lt;<span class="ty">A</span>: <span class="ty">Type</span>, <span class="ty">B</span>: <span class="ty">Type</span>&gt;(
+<a class="ln" id="L46" href="#L46">46</a>    <span class="var">f</span>: <span class="ty">Layer</span>(<span class="ty">A</span>, <span class="ty">B</span>)
+<a class="ln" id="L47" href="#L47">47</a>  ): <span class="fn">Layer::then</span>(f, <span class="fn">Layer::identity</span>()) = f {
+<a class="ln" id="L48" href="#L48">48</a>    <span class="fn">Layer::eta</span>(f)
+<a class="ln" id="L49" href="#L49">49</a>  }
+<a class="ln" id="L50" href="#L50">50</a>
+<a class="ln" id="L51" href="#L51">51</a>  <span class="com">// Applying a composite is applying the parts, inner first.</span>
+<a class="ln" id="L52" href="#L52">52</a>  <span class="kw">theorem</span> <span class="fn">then_apply</span>&lt;<span class="ty">A</span>: <span class="ty">Type</span>, <span class="ty">B</span>: <span class="ty">Type</span>, <span class="ty">C</span>: <span class="ty">Type</span>&gt;(
+<a class="ln" id="L53" href="#L53">53</a>    <span class="var">f</span>: <span class="ty">Layer</span>(<span class="ty">A</span>, <span class="ty">B</span>),
+<a class="ln" id="L54" href="#L54">54</a>    <span class="var">g</span>: <span class="ty">Layer</span>(<span class="ty">B</span>, <span class="ty">C</span>),
+<a class="ln" id="L55" href="#L55">55</a>    <span class="var">a</span>: <span class="ty">A</span>
+<a class="ln" id="L56" href="#L56">56</a>  ): <span class="fn">Layer::apply</span>(<span class="fn">Layer::then</span>(f, g), a) = <span class="fn">Layer::apply</span>(g, <span class="fn">Layer::apply</span>(f, a)) {
+<a class="ln" id="L57" href="#L57">57</a>    <span class="ty">Refl</span>
+<a class="ln" id="L58" href="#L58">58</a>  }
+<a class="ln" id="L59" href="#L59">59</a>}
+</code></pre>
+</html>

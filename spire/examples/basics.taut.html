@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>examples/basics.taut</title><style>:root{color-scheme:light dark;--bg:#fff;--fg:#1f2328;--mut:#6e7781;--kw:#cf222e;--str:#0a3069;--num:#0550ae;--com:#6e7781;--mac:#8250df;--ty:#953800;--fn:#6639ba;--var:#116329;--op:#0550ae;--link:#0969da;--sel:#fff8c5}@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--mut:#7d8590;--kw:#ff7b72;--str:#a5d6ff;--num:#79c0ff;--com:#8b949e;--mac:#d2a8ff;--ty:#ffa657;--fn:#d2a8ff;--var:#7ee787;--op:#79c0ff;--link:#58a6ff;--sel:#3a3000}}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,sans-serif}nav,main{padding:8px 16px}a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}pre{margin:0;padding:8px 0;font:13px/1.5 ui-monospace,monospace;overflow-x:auto}pre a{color:inherit}pre a[href^="#"],pre a[href*=".html"]{text-decoration:underline dotted}.ln{display:inline-block;width:5ch;margin-right:2ch;text-align:right;color:var(--mut);user-select:none;text-decoration:none!important}.ln:target{background:var(--sel)}.kw{color:var(--kw)}.str{color:var(--str)}.num{color:var(--num)}.com{color:var(--com)}.mac{color:var(--mac)}.ty{color:var(--ty)}.fn{color:var(--fn)}.var{color:var(--var)}.op{color:var(--op)}ul{list-style:none;padding-left:0}li li{padding-left:2ch}.kind{color:var(--mut)}</style>
+<nav><a href="../index.html">index</a> / examples/basics.taut</nav>
+<pre><code><a class="ln" id="L1" href="#L1">1</a><span class="kw">import</span> <span class="str">&quot;../src/service.taut&quot;</span> { <span class="ty">Outcome</span>, <span class="ty">Service</span>, service_call, service_fn }
+<a class="ln" id="L2" href="#L2">2</a><span class="kw">import</span> <span class="str">&quot;../src/layer.taut&quot;</span> { <span class="ty">Layer</span> }
+<a class="ln" id="L3" href="#L3">3</a><span class="kw">import</span> <span class="str">&quot;../src/middleware.taut&quot;</span> { filter, map_err, map_request, map_response }
+<a class="ln" id="L4" href="#L4">4</a><span class="kw">import</span> <span class="str">&quot;../src/rate_limit.taut&quot;</span> { refill }
+<a class="ln" id="L5" href="#L5">5</a>
+<a class="ln" id="L6" href="#L6">6</a><span class="com">// The small pieces on their own: a service made from a function, the three</span>
+<a class="ln" id="L7" href="#L7">7</a><span class="com">// mappings, a filter, and a refill of the rate limit's tokens.</span>
+<a class="ln" id="L8" href="#L8">8</a>
+<a class="ln" id="L9" href="#L9">9</a><span class="kw">fn</span> <span class="fn">double</span>(<span class="var">n</span>: <span class="ty">Nat</span>): <a href="../src/service.taut.html#L2"><span class="ty">Outcome</span></a>(<span class="ty">Nat</span>, <span class="ty">Nat</span>) {
+<a class="ln" id="L10" href="#L10">10</a>  <a href="../src/service.taut.html#L3"><span class="ty">Outcome::Ok</span></a>(&lt;<span class="ty">Res</span>: <span class="ty">Nat</span>, <span class="ty">E</span>: <span class="ty">Nat</span>&gt;, <a href="#L17"><span class="fn">add</span></a>(n, n))
+<a class="ln" id="L11" href="#L11">11</a>}
+<a class="ln" id="L12" href="#L12">12</a>
+<a class="ln" id="L13" href="#L13">13</a><span class="kw">fn</span> <span class="fn">base</span>(): <a href="../src/service.taut.html#L11"><span class="ty">Service</span></a>(<span class="ty">Unit</span>, <span class="ty">Nat</span>, <span class="ty">Nat</span>, <span class="ty">Nat</span>) {
+<a class="ln" id="L14" href="#L14">14</a>  <a href="../src/service.taut.html#L26"><span class="fn">service_fn</span></a>(<a href="#L9">double</a>)
+<a class="ln" id="L15" href="#L15">15</a>}
+<a class="ln" id="L16" href="#L16">16</a>
+<a class="ln" id="L17" href="#L17">17</a><span class="kw">fn</span> <span class="fn">add</span>(<span class="var">a</span>: <span class="ty">Nat</span>, <span class="var">b</span>: <span class="ty">Nat</span>): <span class="ty">Nat</span> {
+<a class="ln" id="L18" href="#L18">18</a>  <span class="kw">match</span> a {
+<a class="ln" id="L19" href="#L19">19</a>    <span class="ty">Zero</span> =&gt; b
+<a class="ln" id="L20" href="#L20">20</a>    <span class="ty">Succ</span>(k) =&gt; <span class="ty">Succ</span>(<a href="#L17"><span class="fn">add</span></a>(k, b))
+<a class="ln" id="L21" href="#L21">21</a>  }
+<a class="ln" id="L22" href="#L22">22</a>}
+<a class="ln" id="L23" href="#L23">23</a>
+<a class="ln" id="L24" href="#L24">24</a><span class="kw">theorem</span> <span class="fn">fn_answers</span>(): <a href="../src/service.taut.html#L15"><span class="fn">service_call</span></a>(
+<a class="ln" id="L25" href="#L25">25</a>  <a href="#L13"><span class="fn">base</span></a>(),
+<a class="ln" id="L26" href="#L26">26</a>  (),
+<a class="ln" id="L27" href="#L27">27</a>  <span class="ty">Succ</span>(<span class="ty">Succ</span>(<span class="ty">Zero</span>))
+<a class="ln" id="L28" href="#L28">28</a>) = #(@outcome <a href="../src/service.taut.html#L3"><span class="ty">Outcome::Ok</span></a>(&lt;<span class="ty">Res</span>: <span class="ty">Nat</span>, <span class="ty">E</span>: <span class="ty">Nat</span>&gt;, <span class="ty">Succ</span>(<span class="ty">Succ</span>(<span class="ty">Succ</span>(<span class="ty">Succ</span>(<span class="ty">Zero</span>))))), @state ()) {
+<a class="ln" id="L29" href="#L29">29</a>  <span class="ty">Refl</span>
+<a class="ln" id="L30" href="#L30">30</a>}
+<a class="ln" id="L31" href="#L31">31</a>
+<a class="ln" id="L32" href="#L32">32</a><span class="kw">fn</span> <span class="fn">inc</span>(<span class="var">n</span>: <span class="ty">Nat</span>): <span class="ty">Nat</span> {
+<a class="ln" id="L33" href="#L33">33</a>  <span class="ty">Succ</span>(n)
+<a class="ln" id="L34" href="#L34">34</a>}
+<a class="ln" id="L35" href="#L35">35</a>
+<a class="ln" id="L36" href="#L36">36</a><span class="kw">theorem</span> <span class="fn">request_mapped</span>(): <a href="../src/service.taut.html#L15"><span class="fn">service_call</span></a>(
+<a class="ln" id="L37" href="#L37">37</a>  <a href="../src/layer.taut.html#L9"><span class="fn">Layer::apply</span></a>(<a href="../src/middleware.taut.html#L6"><span class="fn">map_request</span></a>(&lt;<span class="ty">S</span>: <span class="ty">Unit</span>, <span class="ty">R1</span>: <span class="ty">Nat</span>, <span class="ty">R2</span>: <span class="ty">Nat</span>, <span class="ty">Res</span>: <span class="ty">Nat</span>, <span class="ty">E</span>: <span class="ty">Nat</span>&gt;, <a href="#L32">inc</a>), <a href="#L13"><span class="fn">base</span></a>()),
+<a class="ln" id="L38" href="#L38">38</a>  (),
+<a class="ln" id="L39" href="#L39">39</a>  <span class="ty">Succ</span>(<span class="ty">Zero</span>)
+<a class="ln" id="L40" href="#L40">40</a>) = #(@outcome <a href="../src/service.taut.html#L3"><span class="ty">Outcome::Ok</span></a>(&lt;<span class="ty">Res</span>: <span class="ty">Nat</span>, <span class="ty">E</span>: <span class="ty">Nat</span>&gt;, <span class="ty">Succ</span>(<span class="ty">Succ</span>(<span class="ty">Succ</span>(<span class="ty">Succ</span>(<span class="ty">Zero</span>))))), @state ()) {
+<a class="ln" id="L41" href="#L41">41</a>  <span class="ty">Refl</span>
+<a class="ln" id="L42" href="#L42">42</a>}
+<a class="ln" id="L43" href="#L43">43</a>
+<a class="ln" id="L44" href="#L44">44</a><span class="kw">theorem</span> <span class="fn">response_mapped</span>(): <a href="../src/service.taut.html#L15"><span class="fn">service_call</span></a>(
+<a class="ln" id="L45" href="#L45">45</a>  <a href="../src/layer.taut.html#L9"><span class="fn">Layer::apply</span></a>(<a href="../src/middleware.taut.html#L35"><span class="fn">map_response</span></a>(&lt;<span class="ty">S</span>: <span class="ty">Unit</span>, <span class="ty">Req</span>: <span class="ty">Nat</span>, <span class="ty">Res</span>: <span class="ty">Nat</span>, <span class="ty">Res2</span>: <span class="ty">Nat</span>, <span class="ty">E</span>: <span class="ty">Nat</span>&gt;, <a href="#L32">inc</a>), <a href="#L13"><span class="fn">base</span></a>()),
+<a class="ln" id="L46" href="#L46">46</a>  (),
+<a class="ln" id="L47" href="#L47">47</a>  <span class="ty">Succ</span>(<span class="ty">Zero</span>)
+<a class="ln" id="L48" href="#L48">48</a>) = #(@outcome <a href="../src/service.taut.html#L3"><span class="ty">Outcome::Ok</span></a>(&lt;<span class="ty">Res</span>: <span class="ty">Nat</span>, <span class="ty">E</span>: <span class="ty">Nat</span>&gt;, <span class="ty">Succ</span>(<span class="ty">Succ</span>(<span class="ty">Succ</span>(<span class="ty">Zero</span>)))), @state ()) {
+<a class="ln" id="L49" href="#L49">49</a>  <span class="ty">Refl</span>
+<a class="ln" id="L50" href="#L50">50</a>}
+<a class="ln" id="L51" href="#L51">51</a>
+<a class="ln" id="L52" href="#L52">52</a><span class="kw">fn</span> <span class="fn">fails</span>(<span class="var">n</span>: <span class="ty">Nat</span>): <a href="../src/service.taut.html#L2"><span class="ty">Outcome</span></a>(<span class="ty">Nat</span>, <span class="ty">Nat</span>) {
+<a class="ln" id="L53" href="#L53">53</a>  <a href="../src/service.taut.html#L4"><span class="ty">Outcome::Err</span></a>(&lt;<span class="ty">Res</span>: <span class="ty">Nat</span>, <span class="ty">E</span>: <span class="ty">Nat</span>&gt;, n)
+<a class="ln" id="L54" href="#L54">54</a>}
+<a class="ln" id="L55" href="#L55">55</a>
+<a class="ln" id="L56" href="#L56">56</a><span class="kw">theorem</span> <span class="fn">error_mapped</span>(): <a href="../src/service.taut.html#L15"><span class="fn">service_call</span></a>(
+<a class="ln" id="L57" href="#L57">57</a>  <a href="../src/layer.taut.html#L9"><span class="fn">Layer::apply</span></a>(<a href="../src/middleware.taut.html#L45"><span class="fn">map_err</span></a>(&lt;<span class="ty">S</span>: <span class="ty">Unit</span>, <span class="ty">Req</span>: <span class="ty">Nat</span>, <span class="ty">Res</span>: <span class="ty">Nat</span>, <span class="ty">E</span>: <span class="ty">Nat</span>, <span class="ty">E2</span>: <span class="ty">Nat</span>&gt;, <a href="#L32">inc</a>), <a href="../src/service.taut.html#L26"><span class="fn">service_fn</span></a>(<a href="#L52">fails</a>)),
+<a class="ln" id="L58" href="#L58">58</a>  (),
+<a class="ln" id="L59" href="#L59">59</a>  <span class="ty">Succ</span>(<span class="ty">Zero</span>)
+<a class="ln" id="L60" href="#L60">60</a>) = #(@outcome <a href="../src/service.taut.html#L4"><span class="ty">Outcome::Err</span></a>(&lt;<span class="ty">Res</span>: <span class="ty">Nat</span>, <span class="ty">E</span>: <span class="ty">Nat</span>&gt;, <span class="ty">Succ</span>(<span class="ty">Succ</span>(<span class="ty">Zero</span>))), @state ()) {
+<a class="ln" id="L61" href="#L61">61</a>  <span class="ty">Refl</span>
+<a class="ln" id="L62" href="#L62">62</a>}
+<a class="ln" id="L63" href="#L63">63</a>
+<a class="ln" id="L64" href="#L64">64</a><span class="com">// Zero is refused with the error `Zero`; anything else passes.</span>
+<a class="ln" id="L65" href="#L65">65</a><span class="kw">fn</span> <span class="fn">not_zero</span>(<span class="var">n</span>: <span class="ty">Nat</span>): <span class="ty">Option</span>(<span class="ty">Nat</span>) {
+<a class="ln" id="L66" href="#L66">66</a>  <span class="kw">match</span> n {
+<a class="ln" id="L67" href="#L67">67</a>    <span class="ty">Zero</span> =&gt; <span class="ty">Some</span>(<span class="ty">Zero</span>)
+<a class="ln" id="L68" href="#L68">68</a>    <span class="ty">Succ</span>(_) =&gt; <span class="ty">None</span>
+<a class="ln" id="L69" href="#L69">69</a>  }
+<a class="ln" id="L70" href="#L70">70</a>}
+<a class="ln" id="L71" href="#L71">71</a>
+<a class="ln" id="L72" href="#L72">72</a><span class="kw">theorem</span> <span class="fn">filter_refuses</span>(): <a href="../src/service.taut.html#L15"><span class="fn">service_call</span></a>(
+<a class="ln" id="L73" href="#L73">73</a>  <a href="../src/layer.taut.html#L9"><span class="fn">Layer::apply</span></a>(<a href="../src/middleware.taut.html#L86"><span class="fn">filter</span></a>(&lt;<span class="ty">S</span>: <span class="ty">Unit</span>, <span class="ty">Req</span>: <span class="ty">Nat</span>, <span class="ty">Res</span>: <span class="ty">Nat</span>, <span class="ty">E</span>: <span class="ty">Nat</span>&gt;, <a href="#L65">not_zero</a>), <a href="#L13"><span class="fn">base</span></a>()),
+<a class="ln" id="L74" href="#L74">74</a>  (),
+<a class="ln" id="L75" href="#L75">75</a>  <span class="ty">Zero</span>
+<a class="ln" id="L76" href="#L76">76</a>) = #(@outcome <a href="../src/service.taut.html#L4"><span class="ty">Outcome::Err</span></a>(&lt;<span class="ty">Res</span>: <span class="ty">Nat</span>, <span class="ty">E</span>: <span class="ty">Nat</span>&gt;, <span class="ty">Zero</span>), @state ()) {
+<a class="ln" id="L77" href="#L77">77</a>  <span class="ty">Refl</span>
+<a class="ln" id="L78" href="#L78">78</a>}
+<a class="ln" id="L79" href="#L79">79</a>
+<a class="ln" id="L80" href="#L80">80</a><span class="kw">theorem</span> <span class="fn">filter_passes</span>(): <a href="../src/service.taut.html#L15"><span class="fn">service_call</span></a>(
+<a class="ln" id="L81" href="#L81">81</a>  <a href="../src/layer.taut.html#L9"><span class="fn">Layer::apply</span></a>(<a href="../src/middleware.taut.html#L86"><span class="fn">filter</span></a>(&lt;<span class="ty">S</span>: <span class="ty">Unit</span>, <span class="ty">Req</span>: <span class="ty">Nat</span>, <span class="ty">Res</span>: <span class="ty">Nat</span>, <span class="ty">E</span>: <span class="ty">Nat</span>&gt;, <a href="#L65">not_zero</a>), <a href="#L13"><span class="fn">base</span></a>()),
+<a class="ln" id="L82" href="#L82">82</a>  (),
+<a class="ln" id="L83" href="#L83">83</a>  <span class="ty">Succ</span>(<span class="ty">Zero</span>)
+<a class="ln" id="L84" href="#L84">84</a>) = #(@outcome <a href="../src/service.taut.html#L3"><span class="ty">Outcome::Ok</span></a>(&lt;<span class="ty">Res</span>: <span class="ty">Nat</span>, <span class="ty">E</span>: <span class="ty">Nat</span>&gt;, <span class="ty">Succ</span>(<span class="ty">Succ</span>(<span class="ty">Zero</span>))), @state ()) {
+<a class="ln" id="L85" href="#L85">85</a>  <span class="ty">Refl</span>
+<a class="ln" id="L86" href="#L86">86</a>}
+<a class="ln" id="L87" href="#L87">87</a>
+<a class="ln" id="L88" href="#L88">88</a><span class="com">// After the budget of one request is spent, `refill` gives the token back.</span>
+<a class="ln" id="L89" href="#L89">89</a><span class="kw">theorem</span> <span class="fn">refill_resets</span>(): <a href="../src/rate_limit.taut.html#L58"><span class="fn">refill</span></a>(
+<a class="ln" id="L90" href="#L90">90</a>  <span class="ty">Succ</span>(<span class="ty">Zero</span>),
+<a class="ln" id="L91" href="#L91">91</a>  #(@tokens <span class="ty">Zero</span>, @state ())
+<a class="ln" id="L92" href="#L92">92</a>) = #(@tokens <span class="ty">Succ</span>(<span class="ty">Zero</span>), @state ()) {
+<a class="ln" id="L93" href="#L93">93</a>  <span class="ty">Refl</span>
+<a class="ln" id="L94" href="#L94">94</a>}
+<a class="ln" id="L95" href="#L95">95</a>
+<a class="ln" id="L96" href="#L96">96</a><span class="com">// The laws `spire` proves hold for the layers made here: the identity layer changes</span>
+<a class="ln" id="L97" href="#L97">97</a><span class="com">// nothing (`Layer::identity_left`), and stacking is associative (`Layer::then_assoc`).</span>
+<a class="ln" id="L98" href="#L98">98</a><span class="kw">fn</span> <span class="fn">request_layer</span>(): <a href="../src/layer.taut.html#L4"><span class="ty">Layer</span></a>(<a href="../src/service.taut.html#L11"><span class="ty">Service</span></a>(<span class="ty">Unit</span>, <span class="ty">Nat</span>, <span class="ty">Nat</span>, <span class="ty">Nat</span>), <a href="../src/service.taut.html#L11"><span class="ty">Service</span></a>(<span class="ty">Unit</span>, <span class="ty">Nat</span>, <span class="ty">Nat</span>, <span class="ty">Nat</span>)) {
+<a class="ln" id="L99" href="#L99">99</a>  <a href="../src/middleware.taut.html#L6"><span class="fn">map_request</span></a>(&lt;<span class="ty">S</span>: <span class="ty">Unit</span>, <span class="ty">R1</span>: <span class="ty">Nat</span>, <span class="ty">R2</span>: <span class="ty">Nat</span>, <span class="ty">Res</span>: <span class="ty">Nat</span>, <span class="ty">E</span>: <span class="ty">Nat</span>&gt;, <a href="#L32">inc</a>)
+<a class="ln" id="L100" href="#L100">100</a>}
+<a class="ln" id="L101" href="#L101">101</a>
+<a class="ln" id="L102" href="#L102">102</a><span class="kw">theorem</span> <span class="fn">identity_changes_nothing</span>(): <a href="../src/layer.taut.html#L16"><span class="fn">Layer::then</span></a>(
+<a class="ln" id="L103" href="#L103">103</a>  <a href="../src/layer.taut.html#L20"><span class="fn">Layer::identity</span></a>(),
+<a class="ln" id="L104" href="#L104">104</a>  <a href="#L98"><span class="fn">request_layer</span></a>()
+<a class="ln" id="L105" href="#L105">105</a>) = <a href="#L98"><span class="fn">request_layer</span></a>() {
+<a class="ln" id="L106" href="#L106">106</a>  <span class="fn">Layer::identity_left</span>(<a href="#L98"><span class="fn">request_layer</span></a>())
+<a class="ln" id="L107" href="#L107">107</a>}
+<a class="ln" id="L108" href="#L108">108</a>
+<a class="ln" id="L109" href="#L109">109</a><span class="kw">theorem</span> <span class="fn">stacking_is_associative</span>(): <a href="../src/layer.taut.html#L16"><span class="fn">Layer::then</span></a>(
+<a class="ln" id="L110" href="#L110">110</a>  <a href="../src/layer.taut.html#L16"><span class="fn">Layer::then</span></a>(<a href="#L98"><span class="fn">request_layer</span></a>(), <a href="#L98"><span class="fn">request_layer</span></a>()),
+<a class="ln" id="L111" href="#L111">111</a>  <a href="#L98"><span class="fn">request_layer</span></a>()
+<a class="ln" id="L112" href="#L112">112</a>) = <a href="../src/layer.taut.html#L16"><span class="fn">Layer::then</span></a>(<a href="#L98"><span class="fn">request_layer</span></a>(), <a href="../src/layer.taut.html#L16"><span class="fn">Layer::then</span></a>(<a href="#L98"><span class="fn">request_layer</span></a>(), <a href="#L98"><span class="fn">request_layer</span></a>())) {
+<a class="ln" id="L113" href="#L113">113</a>  <span class="fn">Layer::then_assoc</span>(<a href="#L98"><span class="fn">request_layer</span></a>(), <a href="#L98"><span class="fn">request_layer</span></a>(), <a href="#L98"><span class="fn">request_layer</span></a>())
+<a class="ln" id="L114" href="#L114">114</a>}
+</code></pre>
+</html>

@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>src/retry.taut</title><style>:root{color-scheme:light dark;--bg:#fff;--fg:#1f2328;--mut:#6e7781;--kw:#cf222e;--str:#0a3069;--num:#0550ae;--com:#6e7781;--mac:#8250df;--ty:#953800;--fn:#6639ba;--var:#116329;--op:#0550ae;--link:#0969da;--sel:#fff8c5}@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--mut:#7d8590;--kw:#ff7b72;--str:#a5d6ff;--num:#79c0ff;--com:#8b949e;--mac:#d2a8ff;--ty:#ffa657;--fn:#d2a8ff;--var:#7ee787;--op:#79c0ff;--link:#58a6ff;--sel:#3a3000}}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,sans-serif}nav,main{padding:8px 16px}a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}pre{margin:0;padding:8px 0;font:13px/1.5 ui-monospace,monospace;overflow-x:auto}pre a{color:inherit}pre a[href^="#"],pre a[href*=".html"]{text-decoration:underline dotted}.ln{display:inline-block;width:5ch;margin-right:2ch;text-align:right;color:var(--mut);user-select:none;text-decoration:none!important}.ln:target{background:var(--sel)}.kw{color:var(--kw)}.str{color:var(--str)}.num{color:var(--num)}.com{color:var(--com)}.mac{color:var(--mac)}.ty{color:var(--ty)}.fn{color:var(--fn)}.var{color:var(--var)}.op{color:var(--op)}ul{list-style:none;padding-left:0}li li{padding-left:2ch}.kind{color:var(--mut)}</style>
+<nav><a href="../index.html">index</a> / src/retry.taut</nav>
+<pre><code><a class="ln" id="L1" href="#L1">1</a><span class="kw">import</span> <span class="str">&quot;service.taut&quot;</span> { <span class="ty">Outcome</span>, <span class="ty">Service</span>, service_call }
+<a class="ln" id="L2" href="#L2">2</a><span class="kw">import</span> <span class="str">&quot;layer.taut&quot;</span> { <span class="ty">Layer</span> }
+<a class="ln" id="L3" href="#L3">3</a>
+<a class="ln" id="L4" href="#L4">4</a><span class="com">// Retry: on an error that `should` accepts, call the service again with the</span>
+<a class="ln" id="L5" href="#L5">5</a><span class="com">// state the failed call left, at most `n` more times. The first answer that</span>
+<a class="ln" id="L6" href="#L6">6</a><span class="com">// is a response, or the last error, is the result.</span>
+<a class="ln" id="L7" href="#L7">7</a>
+<a class="ln" id="L8" href="#L8">8</a><span class="com">// `stop` on `false`, `go` on `true`.</span>
+<a class="ln" id="L9" href="#L9">9</a><span class="kw">fn</span> <span class="fn">yn_pick</span>&lt;<span class="ty">A</span>&gt;(<span class="var">y</span>: <span class="ty">Bool</span>, <span class="var">stop</span>: <span class="ty">A</span>, <span class="var">go</span>: <span class="ty">A</span>): <span class="ty">A</span> {
+<a class="ln" id="L10" href="#L10">10</a>  <span class="kw">match</span> y { <span class="kw">false</span> =&gt; stop, <span class="kw">true</span> =&gt; go }
+<a class="ln" id="L11" href="#L11">11</a>}
+<a class="ln" id="L12" href="#L12">12</a>
+<a class="ln" id="L13" href="#L13">13</a><span class="kw">theorem</span> <span class="fn">yn_pick_no</span>&lt;<span class="ty">A</span>: <span class="ty">Type</span>&gt;(<span class="var">y</span>: <span class="ty">Bool</span>, <span class="var">stop</span>: <span class="ty">A</span>, <span class="var">go</span>: <span class="ty">A</span>, <span class="var">h</span>: y = <span class="kw">false</span>): <a href="#L9"><span class="fn">yn_pick</span></a>(y, stop, go) = stop {
+<a class="ln" id="L14" href="#L14">14</a>  <span class="fn">Eq::subst</span>((<span class="var">z</span>: <span class="ty">Bool</span>) =&gt; <a href="#L9"><span class="fn">yn_pick</span></a>(&lt;<span class="ty">A</span>: <span class="ty">A</span>&gt;, z, stop, go) = stop, <span class="fn">Eq::sym</span>(h), <span class="ty">Refl</span>)
+<a class="ln" id="L15" href="#L15">15</a>}
+<a class="ln" id="L16" href="#L16">16</a>
+<a class="ln" id="L17" href="#L17">17</a><span class="com">// What to do with the answer of one attempt, `left` attempts still allowed.</span>
+<a class="ln" id="L18" href="#L18">18</a><span class="kw">fn</span> <span class="fn">retry_after</span>&lt;<span class="ty">S</span>: <span class="ty">Shared</span>, <span class="ty">Req</span>: <span class="ty">Shared</span>, <span class="ty">Res</span>, <span class="ty">E</span>: <span class="ty">Shared</span>&gt;(
+<a class="ln" id="L19" href="#L19">19</a>  <span class="var">svc</span>: <a href="../src/service.taut.html#L11"><span class="ty">Service</span></a>(<span class="ty">S</span>, <span class="ty">Req</span>, <span class="ty">Res</span>, <span class="ty">E</span>),
+<a class="ln" id="L20" href="#L20">20</a>  <span class="var">should</span>: (<span class="ty">Req</span>, <span class="ty">E</span>) -&gt; <span class="ty">Bool</span>,
+<a class="ln" id="L21" href="#L21">21</a>  <span class="var">left</span>: <span class="ty">Nat</span>,
+<a class="ln" id="L22" href="#L22">22</a>  <span class="var">r</span>: <span class="ty">Req</span>,
+<a class="ln" id="L23" href="#L23">23</a>  <span class="var">p</span>: @outcome <a href="../src/service.taut.html#L2"><span class="ty">Outcome</span></a>(<span class="ty">Res</span>, <span class="ty">E</span>) × @state <span class="ty">S</span>
+<a class="ln" id="L24" href="#L24">24</a>): @outcome <a href="../src/service.taut.html#L2"><span class="ty">Outcome</span></a>(<span class="ty">Res</span>, <span class="ty">E</span>) × @state <span class="ty">S</span> {
+<a class="ln" id="L25" href="#L25">25</a>  <span class="kw">match</span> left {
+<a class="ln" id="L26" href="#L26">26</a>    <span class="ty">Zero</span> =&gt; p
+<a class="ln" id="L27" href="#L27">27</a>    <span class="ty">Succ</span>(m) =&gt; ⊢ @outcome <a href="../src/service.taut.html#L2"><span class="ty">Outcome</span></a>(<span class="ty">Res</span>, <span class="ty">E</span>) × @state <span class="ty">S</span> <span class="kw">from</span> <span class="kw">match</span> p {
+<a class="ln" id="L28" href="#L28">28</a>      #(@outcome o, @state s) =&gt; ⊢ @outcome <a href="../src/service.taut.html#L2"><span class="ty">Outcome</span></a>(<span class="ty">Res</span>, <span class="ty">E</span>) × @state <span class="ty">S</span> <span class="kw">from</span> <span class="kw">match</span> o {
+<a class="ln" id="L29" href="#L29">29</a>        <span class="ty">Outcome::Ok</span>(x) =&gt; #(@outcome <a href="../src/service.taut.html#L3"><span class="ty">Outcome::Ok</span></a>(&lt;<span class="ty">Res</span>: <span class="ty">Res</span>, <span class="ty">E</span>: <span class="ty">E</span>&gt;, x), @state s)
+<a class="ln" id="L30" href="#L30">30</a>        <span class="ty">Outcome::Err</span>(e) =&gt; <a href="#L9"><span class="fn">yn_pick</span></a>(
+<a class="ln" id="L31" href="#L31">31</a>          <span class="fn">should</span>(r, e),
+<a class="ln" id="L32" href="#L32">32</a>          #(@outcome <a href="../src/service.taut.html#L4"><span class="ty">Outcome::Err</span></a>(&lt;<span class="ty">Res</span>: <span class="ty">Res</span>, <span class="ty">E</span>: <span class="ty">E</span>&gt;, e), @state s),
+<a class="ln" id="L33" href="#L33">33</a>          <a href="#L18"><span class="fn">retry_after</span></a>(svc, should, m, r, <a href="../src/service.taut.html#L15"><span class="fn">service_call</span></a>(svc, s, r))
+<a class="ln" id="L34" href="#L34">34</a>        )
+<a class="ln" id="L35" href="#L35">35</a>      }
+<a class="ln" id="L36" href="#L36">36</a>    }
+<a class="ln" id="L37" href="#L37">37</a>  }
+<a class="ln" id="L38" href="#L38">38</a>}
+<a class="ln" id="L39" href="#L39">39</a>
+<a class="ln" id="L40" href="#L40">40</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">retry</span>&lt;<span class="ty">S</span>: <span class="ty">Shared</span>, <span class="ty">Req</span>: <span class="ty">Shared</span>, <span class="ty">Res</span>, <span class="ty">E</span>: <span class="ty">Shared</span>&gt;(
+<a class="ln" id="L41" href="#L41">41</a>  <span class="var">should</span>: (<span class="ty">Req</span>, <span class="ty">E</span>) -&gt; <span class="ty">Bool</span>,
+<a class="ln" id="L42" href="#L42">42</a>  <span class="var">n</span>: <span class="ty">Nat</span>
+<a class="ln" id="L43" href="#L43">43</a>): <a href="../src/layer.taut.html#L4"><span class="ty">Layer</span></a>(<a href="../src/service.taut.html#L11"><span class="ty">Service</span></a>(<span class="ty">S</span>, <span class="ty">Req</span>, <span class="ty">Res</span>, <span class="ty">E</span>), <a href="../src/service.taut.html#L11"><span class="ty">Service</span></a>(<span class="ty">S</span>, <span class="ty">Req</span>, <span class="ty">Res</span>, <span class="ty">E</span>)) {
+<a class="ln" id="L44" href="#L44">44</a>  <a href="../src/layer.taut.html#L5"><span class="ty">Layer::Mk</span></a>(
+<a class="ln" id="L45" href="#L45">45</a>    (<span class="var">svc</span>: <span class="ty">Service</span>(<span class="ty">S</span>, <span class="ty">Req</span>, <span class="ty">Res</span>, <span class="ty">E</span>)) =&gt; <a href="../src/service.taut.html#L12"><span class="ty">Service::Mk</span></a>(
+<a class="ln" id="L46" href="#L46">46</a>      (<span class="var">s</span>: <span class="ty">S</span>, <span class="var">r</span>: <span class="ty">Req</span>) =&gt; <a href="#L18"><span class="fn">retry_after</span></a>(svc, should, n, r, <a href="../src/service.taut.html#L15"><span class="fn">service_call</span></a>(svc, s, r))
+<a class="ln" id="L47" href="#L47">47</a>    )
+<a class="ln" id="L48" href="#L48">48</a>  )
+<a class="ln" id="L49" href="#L49">49</a>}
+<a class="ln" id="L50" href="#L50">50</a>
+<a class="ln" id="L51" href="#L51">51</a><span class="com">// No retries is the service itself.</span>
+<a class="ln" id="L52" href="#L52">52</a><span class="kw">pub</span> <span class="kw">theorem</span> <span class="fn">retry_zero</span>&lt;<span class="ty">S</span>: <span class="ty">Type</span>, <span class="ty">Req</span>: <span class="ty">Type</span>, <span class="ty">Res</span>: <span class="ty">Type</span>, <span class="ty">E</span>: <span class="ty">Type</span>&gt;(
+<a class="ln" id="L53" href="#L53">53</a>  <span class="var">should</span>: (<span class="ty">Req</span>, <span class="ty">E</span>) -&gt; <span class="ty">Bool</span>,
+<a class="ln" id="L54" href="#L54">54</a>  <span class="var">svc</span>: <a href="../src/service.taut.html#L11"><span class="ty">Service</span></a>(<span class="ty">S</span>, <span class="ty">Req</span>, <span class="ty">Res</span>, <span class="ty">E</span>),
+<a class="ln" id="L55" href="#L55">55</a>  <span class="var">s</span>: <span class="ty">S</span>,
+<a class="ln" id="L56" href="#L56">56</a>  <span class="var">r</span>: <span class="ty">Req</span>
+<a class="ln" id="L57" href="#L57">57</a>): <a href="../src/service.taut.html#L15"><span class="fn">service_call</span></a>(<a href="../src/layer.taut.html#L9"><span class="fn">Layer::apply</span></a>(<a href="#L40"><span class="fn">retry</span></a>(should, <span class="ty">Zero</span>), svc), s, r) = <a href="../src/service.taut.html#L15"><span class="fn">service_call</span></a>(svc, s, r) {
+<a class="ln" id="L58" href="#L58">58</a>  <span class="ty">Refl</span>
+<a class="ln" id="L59" href="#L59">59</a>}
+<a class="ln" id="L60" href="#L60">60</a>
+<a class="ln" id="L61" href="#L61">61</a><span class="com">// A response is never retried.</span>
+<a class="ln" id="L62" href="#L62">62</a><span class="kw">pub</span> <span class="kw">theorem</span> <span class="fn">retry_after_ok</span>&lt;<span class="ty">S</span>: <span class="ty">Type</span>, <span class="ty">Req</span>: <span class="ty">Type</span>, <span class="ty">Res</span>: <span class="ty">Type</span>, <span class="ty">E</span>: <span class="ty">Type</span>&gt;(
+<a class="ln" id="L63" href="#L63">63</a>  <span class="var">svc</span>: <a href="../src/service.taut.html#L11"><span class="ty">Service</span></a>(<span class="ty">S</span>, <span class="ty">Req</span>, <span class="ty">Res</span>, <span class="ty">E</span>),
+<a class="ln" id="L64" href="#L64">64</a>  <span class="var">should</span>: (<span class="ty">Req</span>, <span class="ty">E</span>) -&gt; <span class="ty">Bool</span>,
+<a class="ln" id="L65" href="#L65">65</a>  <span class="var">n</span>: <span class="ty">Nat</span>,
+<a class="ln" id="L66" href="#L66">66</a>  <span class="var">r</span>: <span class="ty">Req</span>,
+<a class="ln" id="L67" href="#L67">67</a>  <span class="var">x</span>: <span class="ty">Res</span>,
+<a class="ln" id="L68" href="#L68">68</a>  <span class="var">s</span>: <span class="ty">S</span>
+<a class="ln" id="L69" href="#L69">69</a>): <a href="#L18"><span class="fn">retry_after</span></a>(
+<a class="ln" id="L70" href="#L70">70</a>  svc,
+<a class="ln" id="L71" href="#L71">71</a>  should,
+<a class="ln" id="L72" href="#L72">72</a>  n,
+<a class="ln" id="L73" href="#L73">73</a>  r,
+<a class="ln" id="L74" href="#L74">74</a>  #(@outcome <a href="../src/service.taut.html#L3"><span class="ty">Outcome::Ok</span></a>(&lt;<span class="ty">Res</span>: <span class="ty">Res</span>, <span class="ty">E</span>: <span class="ty">E</span>&gt;, x), @state s)
+<a class="ln" id="L75" href="#L75">75</a>) = #(@outcome <a href="../src/service.taut.html#L3"><span class="ty">Outcome::Ok</span></a>(&lt;<span class="ty">Res</span>: <span class="ty">Res</span>, <span class="ty">E</span>: <span class="ty">E</span>&gt;, x), @state s) {
+<a class="ln" id="L76" href="#L76">76</a>  ⊢ <a href="#L18"><span class="fn">retry_after</span></a>(
+<a class="ln" id="L77" href="#L77">77</a>    svc,
+<a class="ln" id="L78" href="#L78">78</a>    should,
+<a class="ln" id="L79" href="#L79">79</a>    n,
+<a class="ln" id="L80" href="#L80">80</a>    r,
+<a class="ln" id="L81" href="#L81">81</a>    #(@outcome <a href="../src/service.taut.html#L3"><span class="ty">Outcome::Ok</span></a>(&lt;<span class="ty">Res</span>: <span class="ty">Res</span>, <span class="ty">E</span>: <span class="ty">E</span>&gt;, x), @state s)
+<a class="ln" id="L82" href="#L82">82</a>  ) = #(@outcome <a href="../src/service.taut.html#L3"><span class="ty">Outcome::Ok</span></a>(&lt;<span class="ty">Res</span>: <span class="ty">Res</span>, <span class="ty">E</span>: <span class="ty">E</span>&gt;, x), @state s) <span class="kw">from</span> <span class="kw">match</span> n {
+<a class="ln" id="L83" href="#L83">83</a>    <span class="ty">Zero</span> =&gt; <span class="ty">Refl</span>
+<a class="ln" id="L84" href="#L84">84</a>    <span class="ty">Succ</span>(m) =&gt; <span class="ty">Refl</span>
+<a class="ln" id="L85" href="#L85">85</a>  }
+<a class="ln" id="L86" href="#L86">86</a>}
+<a class="ln" id="L87" href="#L87">87</a>
+<a class="ln" id="L88" href="#L88">88</a><span class="com">// An error `should` refuses is never retried.</span>
+<a class="ln" id="L89" href="#L89">89</a><span class="kw">pub</span> <span class="kw">theorem</span> <span class="fn">retry_after_refused</span>&lt;<span class="ty">S</span>: <span class="ty">Type</span>, <span class="ty">Req</span>: <span class="ty">Type</span>, <span class="ty">Res</span>: <span class="ty">Type</span>, <span class="ty">E</span>: <span class="ty">Type</span>&gt;(
+<a class="ln" id="L90" href="#L90">90</a>  <span class="var">svc</span>: <a href="../src/service.taut.html#L11"><span class="ty">Service</span></a>(<span class="ty">S</span>, <span class="ty">Req</span>, <span class="ty">Res</span>, <span class="ty">E</span>),
+<a class="ln" id="L91" href="#L91">91</a>  <span class="var">should</span>: (<span class="ty">Req</span>, <span class="ty">E</span>) -&gt; <span class="ty">Bool</span>,
+<a class="ln" id="L92" href="#L92">92</a>  <span class="var">n</span>: <span class="ty">Nat</span>,
+<a class="ln" id="L93" href="#L93">93</a>  <span class="var">r</span>: <span class="ty">Req</span>,
+<a class="ln" id="L94" href="#L94">94</a>  <span class="var">e</span>: <span class="ty">E</span>,
+<a class="ln" id="L95" href="#L95">95</a>  <span class="var">s</span>: <span class="ty">S</span>,
+<a class="ln" id="L96" href="#L96">96</a>  <span class="var">h</span>: <span class="fn">should</span>(r, e) = <span class="kw">false</span>
+<a class="ln" id="L97" href="#L97">97</a>): <a href="#L18"><span class="fn">retry_after</span></a>(
+<a class="ln" id="L98" href="#L98">98</a>  svc,
+<a class="ln" id="L99" href="#L99">99</a>  should,
+<a class="ln" id="L100" href="#L100">100</a>  n,
+<a class="ln" id="L101" href="#L101">101</a>  r,
+<a class="ln" id="L102" href="#L102">102</a>  #(@outcome <a href="../src/service.taut.html#L4"><span class="ty">Outcome::Err</span></a>(&lt;<span class="ty">Res</span>: <span class="ty">Res</span>, <span class="ty">E</span>: <span class="ty">E</span>&gt;, e), @state s)
+<a class="ln" id="L103" href="#L103">103</a>) = #(@outcome <a href="../src/service.taut.html#L4"><span class="ty">Outcome::Err</span></a>(&lt;<span class="ty">Res</span>: <span class="ty">Res</span>, <span class="ty">E</span>: <span class="ty">E</span>&gt;, e), @state s) {
+<a class="ln" id="L104" href="#L104">104</a>  ⊢ <a href="#L18"><span class="fn">retry_after</span></a>(
+<a class="ln" id="L105" href="#L105">105</a>    svc,
+<a class="ln" id="L106" href="#L106">106</a>    should,
+<a class="ln" id="L107" href="#L107">107</a>    n,
+<a class="ln" id="L108" href="#L108">108</a>    r,
+<a class="ln" id="L109" href="#L109">109</a>    #(@outcome <a href="../src/service.taut.html#L4"><span class="ty">Outcome::Err</span></a>(&lt;<span class="ty">Res</span>: <span class="ty">Res</span>, <span class="ty">E</span>: <span class="ty">E</span>&gt;, e), @state s)
+<a class="ln" id="L110" href="#L110">110</a>  ) = #(@outcome <a href="../src/service.taut.html#L4"><span class="ty">Outcome::Err</span></a>(&lt;<span class="ty">Res</span>: <span class="ty">Res</span>, <span class="ty">E</span>: <span class="ty">E</span>&gt;, e), @state s) <span class="kw">from</span> <span class="kw">match</span> n {
+<a class="ln" id="L111" href="#L111">111</a>    <span class="ty">Zero</span> =&gt; <span class="ty">Refl</span>
+<a class="ln" id="L112" href="#L112">112</a>    <span class="ty">Succ</span>(m) =&gt; <a href="#L13"><span class="fn">yn_pick_no</span></a>(
+<a class="ln" id="L113" href="#L113">113</a>      <span class="fn">should</span>(r, e),
+<a class="ln" id="L114" href="#L114">114</a>      #(@outcome <a href="../src/service.taut.html#L4"><span class="ty">Outcome::Err</span></a>(&lt;<span class="ty">Res</span>: <span class="ty">Res</span>, <span class="ty">E</span>: <span class="ty">E</span>&gt;, e), @state s),
+<a class="ln" id="L115" href="#L115">115</a>      <a href="#L18"><span class="fn">retry_after</span></a>(svc, should, m, r, <a href="../src/service.taut.html#L15"><span class="fn">service_call</span></a>(svc, s, r)),
+<a class="ln" id="L116" href="#L116">116</a>      h
+<a class="ln" id="L117" href="#L117">117</a>    )
+<a class="ln" id="L118" href="#L118">118</a>  }
+<a class="ln" id="L119" href="#L119">119</a>}
+</code></pre>
+</html>

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>src/service.taut</title><style>:root{color-scheme:light dark;--bg:#fff;--fg:#1f2328;--mut:#6e7781;--kw:#cf222e;--str:#0a3069;--num:#0550ae;--com:#6e7781;--mac:#8250df;--ty:#953800;--fn:#6639ba;--var:#116329;--op:#0550ae;--link:#0969da;--sel:#fff8c5}@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--mut:#7d8590;--kw:#ff7b72;--str:#a5d6ff;--num:#79c0ff;--com:#8b949e;--mac:#d2a8ff;--ty:#ffa657;--fn:#d2a8ff;--var:#7ee787;--op:#79c0ff;--link:#58a6ff;--sel:#3a3000}}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,sans-serif}nav,main{padding:8px 16px}a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}pre{margin:0;padding:8px 0;font:13px/1.5 ui-monospace,monospace;overflow-x:auto}pre a{color:inherit}pre a[href^="#"],pre a[href*=".html"]{text-decoration:underline dotted}.ln{display:inline-block;width:5ch;margin-right:2ch;text-align:right;color:var(--mut);user-select:none;text-decoration:none!important}.ln:target{background:var(--sel)}.kw{color:var(--kw)}.str{color:var(--str)}.num{color:var(--num)}.com{color:var(--com)}.mac{color:var(--mac)}.ty{color:var(--ty)}.fn{color:var(--fn)}.var{color:var(--var)}.op{color:var(--op)}ul{list-style:none;padding-left:0}li li{padding-left:2ch}.kind{color:var(--mut)}</style>
+<nav><a href="../index.html">index</a> / src/service.taut</nav>
+<pre><code><a class="ln" id="L1" href="#L1">1</a><span class="com">// What a call gives back: a response, or an error.</span>
+<a class="ln" id="L2" href="#L2">2</a><span class="kw">pub(open)</span> <span class="kw">inductive</span> <span class="ty">Outcome</span>(<span class="ty">Res</span>: <span class="ty">Type</span>, <span class="ty">E</span>: <span class="ty">Type</span>): <span class="ty">Type</span> {
+<a class="ln" id="L3" href="#L3">3</a>  <span class="ty">Ok</span>(<span class="var">r</span>: <span class="ty">Res</span>): <a href="#L2"><span class="ty">Outcome</span></a>(<span class="ty">Res</span>, <span class="ty">E</span>)
+<a class="ln" id="L4" href="#L4">4</a>  <span class="ty">Err</span>(<span class="var">e</span>: <span class="ty">E</span>): <a href="#L2"><span class="ty">Outcome</span></a>(<span class="ty">Res</span>, <span class="ty">E</span>)
+<a class="ln" id="L5" href="#L5">5</a>}
+<a class="ln" id="L6" href="#L6">6</a>
+<a class="ln" id="L7" href="#L7">7</a><span class="com">// A service answers a request with a response or an error and moves its state</span>
+<a class="ln" id="L8" href="#L8">8</a><span class="com">// along: `(S, Req) -&gt; @outcome Outcome(Res, E) × @state S`. A service with nothing to remember</span>
+<a class="ln" id="L9" href="#L9">9</a><span class="com">// uses `S = ()`. Time and capacity are part of the state, so a middleware that</span>
+<a class="ln" id="L10" href="#L10">10</a><span class="com">// counts or refills is an ordinary function and its behaviour can be proved.</span>
+<a class="ln" id="L11" href="#L11">11</a><span class="kw">pub(open)</span> <span class="kw">inductive</span> <span class="ty">Service</span>(<span class="ty">S</span>: <span class="ty">Type</span>, <span class="ty">Req</span>: <span class="ty">Type</span>, <span class="ty">Res</span>: <span class="ty">Type</span>, <span class="ty">E</span>: <span class="ty">Type</span>): <span class="ty">Type</span> {
+<a class="ln" id="L12" href="#L12">12</a>  <span class="ty">Mk</span>(<span class="var">call</span>: (<span class="ty">S</span>, <span class="ty">Req</span>) -&gt; @outcome <a href="#L2"><span class="ty">Outcome</span></a>(<span class="ty">Res</span>, <span class="ty">E</span>) × @state <span class="ty">S</span>): <a href="#L11"><span class="ty">Service</span></a>(<span class="ty">S</span>, <span class="ty">Req</span>, <span class="ty">Res</span>, <span class="ty">E</span>)
+<a class="ln" id="L13" href="#L13">13</a>}
+<a class="ln" id="L14" href="#L14">14</a>
+<a class="ln" id="L15" href="#L15">15</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">service_call</span>&lt;<span class="ty">S</span>, <span class="ty">Req</span>, <span class="ty">Res</span>, <span class="ty">E</span>&gt;(
+<a class="ln" id="L16" href="#L16">16</a>  <span class="var">svc</span>: <a href="#L11"><span class="ty">Service</span></a>(<span class="ty">S</span>, <span class="ty">Req</span>, <span class="ty">Res</span>, <span class="ty">E</span>),
+<a class="ln" id="L17" href="#L17">17</a>  <span class="var">s</span>: <span class="ty">S</span>,
+<a class="ln" id="L18" href="#L18">18</a>  <span class="var">r</span>: <span class="ty">Req</span>
+<a class="ln" id="L19" href="#L19">19</a>): @outcome <a href="#L2"><span class="ty">Outcome</span></a>(<span class="ty">Res</span>, <span class="ty">E</span>) × @state <span class="ty">S</span> {
+<a class="ln" id="L20" href="#L20">20</a>  <span class="kw">match</span> svc {
+<a class="ln" id="L21" href="#L21">21</a>    <span class="ty">Mk</span>(f) =&gt; <span class="fn">f</span>(s, r)
+<a class="ln" id="L22" href="#L22">22</a>  }
+<a class="ln" id="L23" href="#L23">23</a>}
+<a class="ln" id="L24" href="#L24">24</a>
+<a class="ln" id="L25" href="#L25">25</a><span class="com">// A service that does not use its state, from a function. The state passes through.</span>
+<a class="ln" id="L26" href="#L26">26</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">service_fn</span>&lt;<span class="ty">S</span>, <span class="ty">Req</span>, <span class="ty">Res</span>, <span class="ty">E</span>&gt;(<span class="var">f</span>: (<span class="ty">Req</span>) -&gt; <a href="#L2"><span class="ty">Outcome</span></a>(<span class="ty">Res</span>, <span class="ty">E</span>)): <a href="#L11"><span class="ty">Service</span></a>(<span class="ty">S</span>, <span class="ty">Req</span>, <span class="ty">Res</span>, <span class="ty">E</span>) {
+<a class="ln" id="L27" href="#L27">27</a>  <a href="#L12"><span class="ty">Service::Mk</span></a>((<span class="var">s</span>: <span class="ty">S</span>, <span class="var">r</span>: <span class="ty">Req</span>) =&gt; #(@outcome <span class="fn">f</span>(r), @state s))
+<a class="ln" id="L28" href="#L28">28</a>}
+</code></pre>
+</html>

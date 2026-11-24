@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>src/tsplit.taut</title><style>:root{color-scheme:light dark;--bg:#fff;--fg:#1f2328;--mut:#6e7781;--kw:#cf222e;--str:#0a3069;--num:#0550ae;--com:#6e7781;--mac:#8250df;--ty:#953800;--fn:#6639ba;--var:#116329;--op:#0550ae;--link:#0969da;--sel:#fff8c5}@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--mut:#7d8590;--kw:#ff7b72;--str:#a5d6ff;--num:#79c0ff;--com:#8b949e;--mac:#d2a8ff;--ty:#ffa657;--fn:#d2a8ff;--var:#7ee787;--op:#79c0ff;--link:#58a6ff;--sel:#3a3000}}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,sans-serif}nav,main{padding:8px 16px}a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}pre{margin:0;padding:8px 0;font:13px/1.5 ui-monospace,monospace;overflow-x:auto}pre a{color:inherit}pre a[href^="#"],pre a[href*=".html"]{text-decoration:underline dotted}.ln{display:inline-block;width:5ch;margin-right:2ch;text-align:right;color:var(--mut);user-select:none;text-decoration:none!important}.ln:target{background:var(--sel)}.kw{color:var(--kw)}.str{color:var(--str)}.num{color:var(--num)}.com{color:var(--com)}.mac{color:var(--mac)}.ty{color:var(--ty)}.fn{color:var(--fn)}.var{color:var(--var)}.op{color:var(--op)}ul{list-style:none;padding-left:0}li li{padding-left:2ch}.kind{color:var(--mut)}</style>
+<nav><a href="../index.html">index</a> / src/tsplit.taut</nav>
+<pre><code><a class="ln" id="L1" href="#L1">1</a><span class="kw">import</span> std::base { <span class="ty">List</span> }
+<a class="ln" id="L2" href="#L2">2</a><span class="kw">import</span> std::list { <span class="ty">List</span> }
+<a class="ln" id="L3" href="#L3">3</a><span class="kw">import</span> std::nat { <span class="ty">Nat</span> }
+<a class="ln" id="L4" href="#L4">4</a><span class="kw">import</span> std::text { <span class="ty">Text</span> }
+<a class="ln" id="L5" href="#L5">5</a><span class="kw">import</span> std::text_ops { <span class="ty">Bytes</span>, <span class="ty">Text</span> }
+<a class="ln" id="L6" href="#L6">6</a><span class="kw">import</span> <span class="str">&quot;frame.taut&quot;</span> { between, between_same, between_snoc, le_self }
+<a class="ln" id="L7" href="#L7">7</a><span class="kw">import</span> <span class="str">&quot;at.taut&quot;</span> { opt_cases, take_between }
+<a class="ln" id="L8" href="#L8">8</a>
+<a class="ln" id="L9" href="#L9">9</a><span class="com">// Splitting a text on a byte, reading it where it is: `Text::byte` finds each</span>
+<a class="ln" id="L10" href="#L10">10</a><span class="com">// separator and `Text::slice` cuts each piece, as `Text::split_on` says.</span>
+<a class="ln" id="L11" href="#L11">11</a>
+<a class="ln" id="L12" href="#L12">12</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">nosep</span>(<span class="var">sep</span>: <span class="ty">Nat</span>, <span class="var">p</span>: <span class="ty">List</span>(<span class="ty">Nat</span>)): <span class="ty">Bool</span> {
+<a class="ln" id="L13" href="#L13">13</a>  <span class="kw">match</span> p {
+<a class="ln" id="L14" href="#L14">14</a>    <span class="ty">Nil</span> =&gt; <span class="kw">true</span>
+<a class="ln" id="L15" href="#L15">15</a>    <span class="ty">Cons</span>(h, t) =&gt; ⊢ <span class="ty">Bool</span> <span class="kw">from</span> <span class="kw">match</span> h == sep {
+<a class="ln" id="L16" href="#L16">16</a>      <span class="kw">true</span> =&gt; <span class="kw">false</span>
+<a class="ln" id="L17" href="#L17">17</a>      <span class="kw">false</span> =&gt; <a href="#L12"><span class="fn">nosep</span></a>(sep, t)
+<a class="ln" id="L18" href="#L18">18</a>    }
+<a class="ln" id="L19" href="#L19">19</a>  }
+<a class="ln" id="L20" href="#L20">20</a>}
+<a class="ln" id="L21" href="#L21">21</a>
+<a class="ln" id="L22" href="#L22">22</a><span class="com">// The bytes of `t` from `s` up to `e`.</span>
+<a class="ln" id="L23" href="#L23">23</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">cut_text</span>(<span class="var">t</span>: <span class="ty">Text</span>, <span class="var">s</span>: <span class="ty">Nat</span>, <span class="var">e</span>: <span class="ty">Nat</span>): <span class="ty">Text</span> {
+<a class="ln" id="L24" href="#L24">24</a>  <span class="kw">match</span> <span class="fn">Text::slice</span>(t, s, e) {
+<a class="ln" id="L25" href="#L25">25</a>    <span class="ty">None</span> =&gt; <span class="ty">Text::Mk</span>(<a href="../src/frame.taut.html#L1380"><span class="fn">between</span></a>(<span class="fn">Text::bytes</span>(t), s, e))
+<a class="ln" id="L26" href="#L26">26</a>    <span class="ty">Some</span>(x) =&gt; x
+<a class="ln" id="L27" href="#L27">27</a>  }
+<a class="ln" id="L28" href="#L28">28</a>}
+<a class="ln" id="L29" href="#L29">29</a>
+<a class="ln" id="L30" href="#L30">30</a><span class="com">// The pieces of `t` from `s`, the current one begun at `s` and read up to `i`.</span>
+<a class="ln" id="L31" href="#L31">31</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">split_from</span>(<span class="var">t</span>: <span class="ty">Text</span>, <span class="var">sep</span>: <span class="ty">Nat</span>, <span class="var">s</span>: <span class="ty">Nat</span>, <span class="var">i</span>: <span class="ty">Nat</span>, <span class="var">k</span>: <span class="ty">Nat</span>): <span class="ty">List</span>(<span class="ty">Text</span>) {
+<a class="ln" id="L32" href="#L32">32</a>  <span class="kw">match</span> k {
+<a class="ln" id="L33" href="#L33">33</a>    <span class="ty">Zero</span> =&gt; <span class="ty">Cons</span>(<a href="#L23"><span class="fn">cut_text</span></a>(t, s, i), <span class="ty">Nil</span>)
+<a class="ln" id="L34" href="#L34">34</a>    <span class="ty">Succ</span>(k2) =&gt; ⊢ <span class="ty">List</span>(<span class="ty">Text</span>) <span class="kw">from</span> <span class="kw">match</span> <span class="fn">Text::byte</span>(t, i) {
+<a class="ln" id="L35" href="#L35">35</a>      <span class="ty">None</span> =&gt; <span class="ty">Cons</span>(<a href="#L23"><span class="fn">cut_text</span></a>(t, s, i), <span class="ty">Nil</span>)
+<a class="ln" id="L36" href="#L36">36</a>      <span class="ty">Some</span>(b) =&gt; ⊢ <span class="ty">List</span>(<span class="ty">Text</span>) <span class="kw">from</span> <span class="kw">match</span> b == sep {
+<a class="ln" id="L37" href="#L37">37</a>        <span class="kw">true</span> =&gt; <span class="ty">Cons</span>(<a href="#L23"><span class="fn">cut_text</span></a>(t, s, i), <a href="#L31"><span class="fn">split_from</span></a>(t, sep, <span class="ty">Succ</span>(i), <span class="ty">Succ</span>(i), k2))
+<a class="ln" id="L38" href="#L38">38</a>        <span class="kw">false</span> =&gt; <a href="#L31"><span class="fn">split_from</span></a>(t, sep, s, <span class="ty">Succ</span>(i), k2)
+<a class="ln" id="L39" href="#L39">39</a>      }
+<a class="ln" id="L40" href="#L40">40</a>    }
+<a class="ln" id="L41" href="#L41">41</a>  }
+<a class="ln" id="L42" href="#L42">42</a>}
+<a class="ln" id="L43" href="#L43">43</a>
+<a class="ln" id="L44" href="#L44">44</a><span class="com">// `Text::split_on(t, sep)`, read where the bytes are.</span>
+<a class="ln" id="L45" href="#L45">45</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">split_text</span>(<span class="var">t</span>: <span class="ty">Text</span>, <span class="var">sep</span>: <span class="ty">Nat</span>): <span class="ty">List</span>(<span class="ty">Text</span>) {
+<a class="ln" id="L46" href="#L46">46</a>  <a href="#L31"><span class="fn">split_from</span></a>(t, sep, <span class="num">0</span>, <span class="num">0</span>, <span class="fn">Text::len</span>(t))
+<a class="ln" id="L47" href="#L47">47</a>}
+<a class="ln" id="L48" href="#L48">48</a>
+<a class="ln" id="L49" href="#L49">49</a><span class="com">// ---- why it is `Text::split_on` -------------------------------------------------------</span>
+<a class="ln" id="L50" href="#L50">50</a>
+<a class="ln" id="L51" href="#L51">51</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">prep</span>(<span class="var">p</span>: <span class="ty">List</span>(<span class="ty">Nat</span>), <span class="var">q</span>: <span class="ty">List</span>(<span class="ty">List</span>(<span class="ty">Nat</span>)) × <span class="ty">List</span>(<span class="ty">Nat</span>)): <span class="ty">List</span>(<span class="ty">List</span>(<span class="ty">Nat</span>)) × <span class="ty">List</span>(<span class="ty">Nat</span>) {
+<a class="ln" id="L52" href="#L52">52</a>  <span class="kw">match</span> q {
+<a class="ln" id="L53" href="#L53">53</a>    #(a, c) =&gt; #(a, <span class="fn">List::append</span>(p, c))
+<a class="ln" id="L54" href="#L54">54</a>  }
+<a class="ln" id="L55" href="#L55">55</a>}
+<a class="ln" id="L56" href="#L56">56</a>
+<a class="ln" id="L57" href="#L57">57</a><span class="kw">pub</span> <span class="kw">theorem</span> <span class="fn">prep_nil</span>(<span class="var">q</span>: <span class="ty">List</span>(<span class="ty">List</span>(<span class="ty">Nat</span>)) × <span class="ty">List</span>(<span class="ty">Nat</span>)): <a href="#L51"><span class="fn">prep</span></a>(<span class="ty">Nil</span>, q) = q {
+<a class="ln" id="L58" href="#L58">58</a>  <span class="kw">match</span> q {
+<a class="ln" id="L59" href="#L59">59</a>    #(a, c) =&gt; <span class="ty">Refl</span>
+<a class="ln" id="L60" href="#L60">60</a>  }
+<a class="ln" id="L61" href="#L61">61</a>}
+<a class="ln" id="L62" href="#L62">62</a>
+<a class="ln" id="L63" href="#L63">63</a><span class="kw">pub</span> <span class="kw">theorem</span> <span class="fn">prep_step</span>(
+<a class="ln" id="L64" href="#L64">64</a>  <span class="var">h</span>: <span class="ty">Nat</span>,
+<a class="ln" id="L65" href="#L65">65</a>  <span class="var">sep</span>: <span class="ty">Nat</span>,
+<a class="ln" id="L66" href="#L66">66</a>  <span class="var">p</span>: <span class="ty">List</span>(<span class="ty">Nat</span>),
+<a class="ln" id="L67" href="#L67">67</a>  <span class="var">q</span>: <span class="ty">List</span>(<span class="ty">List</span>(<span class="ty">Nat</span>)) × <span class="ty">List</span>(<span class="ty">Nat</span>),
+<a class="ln" id="L68" href="#L68">68</a>  <span class="var">hh</span>: (h == sep) = <span class="kw">false</span>
+<a class="ln" id="L69" href="#L69">69</a>): <span class="fn">Bytes::split_step</span>(h, sep, <a href="#L51"><span class="fn">prep</span></a>(p, q)) = <a href="#L51"><span class="fn">prep</span></a>(<span class="ty">Cons</span>(h, p), q) {
+<a class="ln" id="L70" href="#L70">70</a>  <span class="kw">match</span> q {
+<a class="ln" id="L71" href="#L71">71</a>    #(a, c) =&gt; <span class="fn">Eq::congr</span>(
+<a class="ln" id="L72" href="#L72">72</a>      (<span class="var">y</span>: <span class="ty">Bool</span>) =&gt; (⊢ <span class="ty">List</span>(<span class="ty">List</span>(<span class="ty">Nat</span>)) × <span class="ty">List</span>(<span class="ty">Nat</span>) <span class="kw">from</span> <span class="kw">match</span> y {
+<a class="ln" id="L73" href="#L73">73</a>        <span class="kw">true</span> =&gt; #(<span class="ty">Cons</span>(<span class="fn">List::append</span>(p, c), a), <span class="ty">List::Nil</span>(&lt;<span class="ty">A</span>: <span class="ty">Nat</span>&gt;))
+<a class="ln" id="L74" href="#L74">74</a>        <span class="kw">false</span> =&gt; #(a, <span class="ty">Cons</span>(h, <span class="fn">List::append</span>(p, c)))
+<a class="ln" id="L75" href="#L75">75</a>      }),
+<a class="ln" id="L76" href="#L76">76</a>      hh
+<a class="ln" id="L77" href="#L77">77</a>    )
+<a class="ln" id="L78" href="#L78">78</a>  }
+<a class="ln" id="L79" href="#L79">79</a>}
+<a class="ln" id="L80" href="#L80">80</a>
+<a class="ln" id="L81" href="#L81">81</a><span class="com">// A piece without the separator goes in front of the first part.</span>
+<a class="ln" id="L82" href="#L82">82</a><span class="kw">pub</span> <span class="kw">theorem</span> <span class="fn">split_prefix</span>(
+<a class="ln" id="L83" href="#L83">83</a>  <span class="var">sep</span>: <span class="ty">Nat</span>,
+<a class="ln" id="L84" href="#L84">84</a>  <span class="var">p</span>: <span class="ty">List</span>(<span class="ty">Nat</span>),
+<a class="ln" id="L85" href="#L85">85</a>  <span class="var">r</span>: <span class="ty">List</span>(<span class="ty">Nat</span>),
+<a class="ln" id="L86" href="#L86">86</a>  <span class="var">hn</span>: <a href="#L12"><span class="fn">nosep</span></a>(sep, p) = <span class="kw">true</span>
+<a class="ln" id="L87" href="#L87">87</a>): <span class="fn">Bytes::split</span>(<span class="fn">List::append</span>(p, r), sep) = <a href="#L51"><span class="fn">prep</span></a>(p, <span class="fn">Bytes::split</span>(r, sep)) {
+<a class="ln" id="L88" href="#L88">88</a>  <span class="kw">match</span> p {
+<a class="ln" id="L89" href="#L89">89</a>    <span class="ty">Nil</span> =&gt; <span class="fn">Eq::sym</span>(<a href="#L57"><span class="fn">prep_nil</span></a>(<span class="fn">Bytes::split</span>(r, sep)))
+<a class="ln" id="L90" href="#L90">90</a>    <span class="ty">Cons</span>(h, t) =&gt; ((<span class="var">hn1</span>: (⊢ <span class="ty">Bool</span> <span class="kw">from</span> <span class="kw">match</span> h == sep { <span class="kw">true</span> =&gt; <span class="kw">false</span>, <span class="kw">false</span> =&gt; <span class="fn">nosep</span>(sep, t) }) = <span class="kw">true</span>) =&gt;
+<a class="ln" id="L91" href="#L91">91</a>      ⊢ <span class="fn">Bytes::split</span>(<span class="fn">List::append</span>(<span class="ty">Cons</span>(h, t), r), sep) = <a href="#L51"><span class="fn">prep</span></a>(<span class="ty">Cons</span>(h, t), <span class="fn">Bytes::split</span>(r, sep)) <span class="kw">from</span> <span class="kw">match</span> h == sep <span class="kw">eqn</span> ye {
+<a class="ln" id="L92" href="#L92">92</a>        <span class="kw">false</span> =&gt; <span class="fn">Eq::trans</span>(
+<a class="ln" id="L93" href="#L93">93</a>          <span class="fn">Eq::congr</span>(⟦<span class="fn">Bytes::split_step</span>(h, sep, □)⟧, <a href="#L82"><span class="fn">split_prefix</span></a>(sep, t, r, hn1)),
+<a class="ln" id="L94" href="#L94">94</a>          <a href="#L63"><span class="fn">prep_step</span></a>(h, sep, t, <span class="fn">Bytes::split</span>(r, sep), ye)
+<a class="ln" id="L95" href="#L95">95</a>        )
+<a class="ln" id="L96" href="#L96">96</a>        <span class="kw">true</span> =&gt; <span class="fn">False::elim</span>(<span class="fn">false_ne_true</span>(hn1))
+<a class="ln" id="L97" href="#L97">97</a>      })(hn)
+<a class="ln" id="L98" href="#L98">98</a>  }
+<a class="ln" id="L99" href="#L99">99</a>}
+<a class="ln" id="L100" href="#L100">100</a>
+<a class="ln" id="L101" href="#L101">101</a><span class="kw">pub</span> <span class="kw">theorem</span> <span class="fn">nosep_snoc</span>(
+<a class="ln" id="L102" href="#L102">102</a>  <span class="var">sep</span>: <span class="ty">Nat</span>,
+<a class="ln" id="L103" href="#L103">103</a>  <span class="var">p</span>: <span class="ty">List</span>(<span class="ty">Nat</span>),
+<a class="ln" id="L104" href="#L104">104</a>  <span class="var">x</span>: <span class="ty">Nat</span>,
+<a class="ln" id="L105" href="#L105">105</a>  <span class="var">hn</span>: <a href="#L12"><span class="fn">nosep</span></a>(sep, p) = <span class="kw">true</span>,
+<a class="ln" id="L106" href="#L106">106</a>  <span class="var">hx</span>: (x == sep) = <span class="kw">false</span>
+<a class="ln" id="L107" href="#L107">107</a>): <a href="#L12"><span class="fn">nosep</span></a>(sep, <span class="fn">List::append</span>(p, <span class="ty">Cons</span>(x, <span class="ty">Nil</span>))) = <span class="kw">true</span> {
+<a class="ln" id="L108" href="#L108">108</a>  <span class="kw">match</span> p {
+<a class="ln" id="L109" href="#L109">109</a>    <span class="ty">Nil</span> =&gt; <span class="fn">Eq::congr</span>((<span class="var">y</span>: <span class="ty">Bool</span>) =&gt; (⊢ <span class="ty">Bool</span> <span class="kw">from</span> <span class="kw">match</span> y { <span class="kw">true</span> =&gt; <span class="kw">false</span>, <span class="kw">false</span> =&gt; <span class="kw">true</span> }), hx)
+<a class="ln" id="L110" href="#L110">110</a>    <span class="ty">Cons</span>(h, t) =&gt; ((<span class="var">hn1</span>: (⊢ <span class="ty">Bool</span> <span class="kw">from</span> <span class="kw">match</span> h == sep { <span class="kw">true</span> =&gt; <span class="kw">false</span>, <span class="kw">false</span> =&gt; <span class="fn">nosep</span>(sep, t) }) = <span class="kw">true</span>) =&gt;
+<a class="ln" id="L111" href="#L111">111</a>      ⊢ (⊢ <span class="ty">Bool</span> <span class="kw">from</span> <span class="kw">match</span> h == sep {
+<a class="ln" id="L112" href="#L112">112</a>        <span class="kw">true</span> =&gt; <span class="kw">false</span>
+<a class="ln" id="L113" href="#L113">113</a>        <span class="kw">false</span> =&gt; <a href="#L12"><span class="fn">nosep</span></a>(sep, <span class="fn">List::append</span>(t, <span class="ty">Cons</span>(x, <span class="ty">Nil</span>)))
+<a class="ln" id="L114" href="#L114">114</a>      }) = <span class="kw">true</span> <span class="kw">from</span> <span class="kw">match</span> h == sep <span class="kw">eqn</span> ye {
+<a class="ln" id="L115" href="#L115">115</a>        <span class="kw">false</span> =&gt; <a href="#L101"><span class="fn">nosep_snoc</span></a>(sep, t, x, hn1, hx)
+<a class="ln" id="L116" href="#L116">116</a>        <span class="kw">true</span> =&gt; <span class="fn">False::elim</span>(<span class="fn">false_ne_true</span>(hn1))
+<a class="ln" id="L117" href="#L117">117</a>      })(hn)
+<a class="ln" id="L118" href="#L118">118</a>  }
+<a class="ln" id="L119" href="#L119">119</a>}
+<a class="ln" id="L120" href="#L120">120</a>
+<a class="ln" id="L121" href="#L121">121</a><span class="kw">pub</span> <span class="kw">theorem</span> <span class="fn">drop_some</span>&lt;<span class="ty">A</span>: <span class="ty">Type</span>&gt;(
+<a class="ln" id="L122" href="#L122">122</a>  <span class="var">l</span>: <span class="ty">List</span>(<span class="ty">A</span>),
+<a class="ln" id="L123" href="#L123">123</a>  <span class="var">i</span>: <span class="ty">Nat</span>,
+<a class="ln" id="L124" href="#L124">124</a>  <span class="var">x</span>: <span class="ty">A</span>,
+<a class="ln" id="L125" href="#L125">125</a>  <span class="var">ho</span>: <span class="fn">List::nth</span>(l, i) = <span class="ty">Some</span>(x)
+<a class="ln" id="L126" href="#L126">126</a>): <span class="fn">List::drop</span>(i, l) = <span class="ty">Cons</span>(x, <span class="fn">List::drop</span>(<span class="ty">Succ</span>(i), l)) {
+<a class="ln" id="L127" href="#L127">127</a>  <span class="kw">match</span> l {
+<a class="ln" id="L128" href="#L128">128</a>    <span class="ty">Nil</span> =&gt; <span class="fn">False::elim</span>(
+<a class="ln" id="L129" href="#L129">129</a>      <span class="fn">false_ne_true</span>(
+<a class="ln" id="L130" href="#L130">130</a>        <span class="fn">Eq::congr</span>((<span class="var">o</span>: <span class="ty">Option</span>(<span class="ty">A</span>)) =&gt; (⊢ <span class="ty">Bool</span> <span class="kw">from</span> <span class="kw">match</span> o { <span class="ty">None</span> =&gt; <span class="kw">false</span>, <span class="ty">Some</span>(y) =&gt; <span class="kw">true</span> }), ho)
+<a class="ln" id="L131" href="#L131">131</a>      )
+<a class="ln" id="L132" href="#L132">132</a>    )
+<a class="ln" id="L133" href="#L133">133</a>    <span class="ty">Cons</span>(h, t) =&gt; ⊢ <span class="fn">List::drop</span>(
+<a class="ln" id="L134" href="#L134">134</a>      i,
+<a class="ln" id="L135" href="#L135">135</a>      <span class="ty">Cons</span>(h, t)
+<a class="ln" id="L136" href="#L136">136</a>    ) = <span class="ty">Cons</span>(x, <span class="fn">List::drop</span>(<span class="ty">Succ</span>(i), <span class="ty">Cons</span>(h, t))) <span class="kw">from</span> <span class="kw">match</span> i {
+<a class="ln" id="L137" href="#L137">137</a>      <span class="ty">Zero</span> =&gt; <span class="fn">Eq::congr</span>(
+<a class="ln" id="L138" href="#L138">138</a>        ⟦<span class="ty">Cons</span>(□, t)⟧,
+<a class="ln" id="L139" href="#L139">139</a>        <span class="fn">Eq::congr</span>((<span class="var">o</span>: <span class="ty">Option</span>(<span class="ty">A</span>)) =&gt; (⊢ <span class="ty">A</span> <span class="kw">from</span> <span class="kw">match</span> o { <span class="ty">None</span> =&gt; h, <span class="ty">Some</span>(y) =&gt; y }), ho)
+<a class="ln" id="L140" href="#L140">140</a>      )
+<a class="ln" id="L141" href="#L141">141</a>      <span class="ty">Succ</span>(j) =&gt; <a href="#L121"><span class="fn">drop_some</span></a>(t, j, x, ho)
+<a class="ln" id="L142" href="#L142">142</a>    }
+<a class="ln" id="L143" href="#L143">143</a>  }
+<a class="ln" id="L144" href="#L144">144</a>}
+<a class="ln" id="L145" href="#L145">145</a>
+<a class="ln" id="L146" href="#L146">146</a><span class="kw">pub</span> <span class="kw">theorem</span> <span class="fn">drop_none</span>&lt;<span class="ty">A</span>: <span class="ty">Type</span>&gt;(
+<a class="ln" id="L147" href="#L147">147</a>  <span class="var">l</span>: <span class="ty">List</span>(<span class="ty">A</span>),
+<a class="ln" id="L148" href="#L148">148</a>  <span class="var">i</span>: <span class="ty">Nat</span>,
+<a class="ln" id="L149" href="#L149">149</a>  <span class="var">ho</span>: <span class="fn">List::nth</span>(l, i) = <span class="ty">None</span>
+<a class="ln" id="L150" href="#L150">150</a>): <span class="fn">List::drop</span>(i, l) = <span class="ty">Nil</span> {
+<a class="ln" id="L151" href="#L151">151</a>  <span class="kw">match</span> l {
+<a class="ln" id="L152" href="#L152">152</a>    <span class="ty">Nil</span> =&gt; ⊢ <span class="fn">List::drop</span>(i, <span class="ty">List::Nil</span>(&lt;<span class="ty">A</span>: <span class="ty">A</span>&gt;)) = <span class="ty">Nil</span> <span class="kw">from</span> <span class="kw">match</span> i {
+<a class="ln" id="L153" href="#L153">153</a>      <span class="ty">Zero</span> =&gt; <span class="ty">Refl</span>
+<a class="ln" id="L154" href="#L154">154</a>      <span class="ty">Succ</span>(j) =&gt; <span class="ty">Refl</span>
+<a class="ln" id="L155" href="#L155">155</a>    }
+<a class="ln" id="L156" href="#L156">156</a>    <span class="ty">Cons</span>(h, t) =&gt; ⊢ <span class="fn">List::drop</span>(i, <span class="ty">Cons</span>(h, t)) = <span class="ty">Nil</span> <span class="kw">from</span> <span class="kw">match</span> i {
+<a class="ln" id="L157" href="#L157">157</a>      <span class="ty">Zero</span> =&gt; <span class="fn">False::elim</span>(
+<a class="ln" id="L158" href="#L158">158</a>        <span class="fn">false_ne_true</span>(
+<a class="ln" id="L159" href="#L159">159</a>          <span class="fn">Eq::congr</span>((<span class="var">o</span>: <span class="ty">Option</span>(<span class="ty">A</span>)) =&gt; (⊢ <span class="ty">Bool</span> <span class="kw">from</span> <span class="kw">match</span> o { <span class="ty">None</span> =&gt; <span class="kw">true</span>, <span class="ty">Some</span>(y) =&gt; <span class="kw">false</span> }), ho)
+<a class="ln" id="L160" href="#L160">160</a>        )
+<a class="ln" id="L161" href="#L161">161</a>      )
+<a class="ln" id="L162" href="#L162">162</a>      <span class="ty">Succ</span>(j) =&gt; <a href="#L146"><span class="fn">drop_none</span></a>(t, j, ho)
+<a class="ln" id="L163" href="#L163">163</a>    }
+<a class="ln" id="L164" href="#L164">164</a>  }
+<a class="ln" id="L165" href="#L165">165</a>}
+<a class="ln" id="L166" href="#L166">166</a>
+<a class="ln" id="L167" href="#L167">167</a><span class="kw">pub</span> <span class="kw">theorem</span> <span class="fn">nil_of_len</span>&lt;<span class="ty">A</span>: <span class="ty">Type</span>&gt;(<span class="var">l</span>: <span class="ty">List</span>(<span class="ty">A</span>), <span class="var">h</span>: (<span class="fn">List::length</span>(l) &lt;= <span class="ty">Zero</span>) = <span class="kw">true</span>): l = <span class="ty">Nil</span> {
+<a class="ln" id="L168" href="#L168">168</a>  <span class="kw">match</span> l {
+<a class="ln" id="L169" href="#L169">169</a>    <span class="ty">Nil</span> =&gt; <span class="ty">Refl</span>
+<a class="ln" id="L170" href="#L170">170</a>    <span class="ty">Cons</span>(x, t) =&gt; <span class="fn">False::elim</span>(<span class="fn">false_ne_true</span>(h))
+<a class="ln" id="L171" href="#L171">171</a>  }
+<a class="ln" id="L172" href="#L172">172</a>}
+<a class="ln" id="L173" href="#L173">173</a>
+<a class="ln" id="L174" href="#L174">174</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">cut_of</span>(<span class="var">o</span>: <span class="ty">Option</span>(<span class="ty">Text</span>), <span class="var">fb</span>: <span class="ty">Text</span>): <span class="ty">Text</span> {
+<a class="ln" id="L175" href="#L175">175</a>  <span class="kw">match</span> o {
+<a class="ln" id="L176" href="#L176">176</a>    <span class="ty">None</span> =&gt; fb
+<a class="ln" id="L177" href="#L177">177</a>    <span class="ty">Some</span>(x) =&gt; x
+<a class="ln" id="L178" href="#L178">178</a>  }
+<a class="ln" id="L179" href="#L179">179</a>}
+<a class="ln" id="L180" href="#L180">180</a>
+<a class="ln" id="L181" href="#L181">181</a><span class="kw">pub</span> <span class="kw">theorem</span> <span class="fn">cut_eq</span>(
+<a class="ln" id="L182" href="#L182">182</a>  <span class="var">t</span>: <span class="ty">Text</span>,
+<a class="ln" id="L183" href="#L183">183</a>  <span class="var">s</span>: <span class="ty">Nat</span>,
+<a class="ln" id="L184" href="#L184">184</a>  <span class="var">e</span>: <span class="ty">Nat</span>
+<a class="ln" id="L185" href="#L185">185</a>): <a href="#L23"><span class="fn">cut_text</span></a>(t, s, e) = <span class="ty">Text::Mk</span>(<a href="../src/frame.taut.html#L1380"><span class="fn">between</span></a>(<span class="fn">Text::bytes</span>(t), s, e)) {
+<a class="ln" id="L186" href="#L186">186</a>  ⊢ <span class="ty">Eq</span>(
+<a class="ln" id="L187" href="#L187">187</a>    <span class="ty">Text</span>,
+<a class="ln" id="L188" href="#L188">188</a>    <a href="#L174"><span class="fn">cut_of</span></a>(
+<a class="ln" id="L189" href="#L189">189</a>      ⊢ <span class="ty">Option</span>(<span class="ty">Text</span>) <span class="kw">from</span> <span class="kw">match</span> s &lt;= e &amp;&amp; (<span class="fn">Text::boundary</span>(t, s) &amp;&amp; <span class="fn">Text::boundary</span>(t, e)) {
+<a class="ln" id="L190" href="#L190">190</a>        <span class="kw">false</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L191" href="#L191">191</a>        <span class="kw">true</span> =&gt; <span class="ty">Some</span>(<span class="ty">Text::Mk</span>(<span class="fn">List::take</span>(e - s, <span class="fn">List::drop</span>(s, <span class="fn">Text::bytes</span>(t)))))
+<a class="ln" id="L192" href="#L192">192</a>      },
+<a class="ln" id="L193" href="#L193">193</a>      <span class="ty">Text::Mk</span>(<a href="../src/frame.taut.html#L1380"><span class="fn">between</span></a>(<span class="fn">Text::bytes</span>(t), s, e))
+<a class="ln" id="L194" href="#L194">194</a>    ),
+<a class="ln" id="L195" href="#L195">195</a>    <span class="ty">Text::Mk</span>(<a href="../src/frame.taut.html#L1380"><span class="fn">between</span></a>(<span class="fn">Text::bytes</span>(t), s, e))
+<a class="ln" id="L196" href="#L196">196</a>  ) <span class="kw">from</span> <span class="kw">match</span> s &lt;= e &amp;&amp; (<span class="fn">Text::boundary</span>(t, s) &amp;&amp; <span class="fn">Text::boundary</span>(t, e)) <span class="kw">eqn</span> ge {
+<a class="ln" id="L197" href="#L197">197</a>    <span class="kw">false</span> =&gt; <span class="ty">Refl</span>
+<a class="ln" id="L198" href="#L198">198</a>    <span class="kw">true</span> =&gt; <span class="fn">Eq::congr</span>((<span class="var">m</span>: <span class="ty">List</span>(<span class="ty">Nat</span>)) =&gt; <span class="ty">Text::Mk</span>(m), <a href="../src/at.taut.html#L870"><span class="fn">take_between</span></a>(<span class="fn">Text::bytes</span>(t), s, e))
+<a class="ln" id="L199" href="#L199">199</a>  }
+<a class="ln" id="L200" href="#L200">200</a>}
+<a class="ln" id="L201" href="#L201">201</a>
+<a class="ln" id="L202" href="#L202">202</a><span class="kw">pub</span> <span class="kw">theorem</span> <span class="fn">end_eq</span>(
+<a class="ln" id="L203" href="#L203">203</a>  <span class="var">t</span>: <span class="ty">Text</span>,
+<a class="ln" id="L204" href="#L204">204</a>  <span class="var">sep</span>: <span class="ty">Nat</span>,
+<a class="ln" id="L205" href="#L205">205</a>  <span class="var">s</span>: <span class="ty">Nat</span>,
+<a class="ln" id="L206" href="#L206">206</a>  <span class="var">i</span>: <span class="ty">Nat</span>,
+<a class="ln" id="L207" href="#L207">207</a>  <span class="var">hn</span>: <a href="#L12"><span class="fn">nosep</span></a>(sep, <a href="../src/frame.taut.html#L1380"><span class="fn">between</span></a>(<span class="fn">Text::bytes</span>(t), s, i)) = <span class="kw">true</span>,
+<a class="ln" id="L208" href="#L208">208</a>  <span class="var">hd</span>: <span class="fn">List::drop</span>(i, <span class="fn">Text::bytes</span>(t)) = <span class="ty">Nil</span>
+<a class="ln" id="L209" href="#L209">209</a>): <span class="ty">Cons</span>(
+<a class="ln" id="L210" href="#L210">210</a>  <a href="#L23"><span class="fn">cut_text</span></a>(t, s, i),
+<a class="ln" id="L211" href="#L211">211</a>  <span class="ty">Nil</span>
+<a class="ln" id="L212" href="#L212">212</a>) = <span class="fn">Text::of_split</span>(
+<a class="ln" id="L213" href="#L213">213</a>  <span class="fn">Bytes::split</span>(<span class="fn">List::append</span>(<a href="../src/frame.taut.html#L1380"><span class="fn">between</span></a>(<span class="fn">Text::bytes</span>(t), s, i), <span class="fn">List::drop</span>(i, <span class="fn">Text::bytes</span>(t))), sep)
+<a class="ln" id="L214" href="#L214">214</a>) {
+<a class="ln" id="L215" href="#L215">215</a>  <span class="fn">Eq::sym</span>(
+<a class="ln" id="L216" href="#L216">216</a>    <span class="fn">Eq::trans</span>(
+<a class="ln" id="L217" href="#L217">217</a>      <span class="fn">Eq::congr</span>(
+<a class="ln" id="L218" href="#L218">218</a>        ⟦<span class="fn">Text::of_split</span>(<span class="fn">Bytes::split</span>(<span class="fn">List::append</span>(<a href="../src/frame.taut.html#L1380"><span class="fn">between</span></a>(<span class="fn">Text::bytes</span>(t), s, i), □), sep))⟧,
+<a class="ln" id="L219" href="#L219">219</a>        hd
+<a class="ln" id="L220" href="#L220">220</a>      ),
+<a class="ln" id="L221" href="#L221">221</a>      <span class="fn">Eq::trans</span>(
+<a class="ln" id="L222" href="#L222">222</a>        <span class="fn">Eq::congr</span>(⟦<span class="fn">Text::of_split</span>(□)⟧, <a href="#L82"><span class="fn">split_prefix</span></a>(sep, <a href="../src/frame.taut.html#L1380"><span class="fn">between</span></a>(<span class="fn">Text::bytes</span>(t), s, i), <span class="ty">Nil</span>, hn)),
+<a class="ln" id="L223" href="#L223">223</a>        <span class="fn">Eq::trans</span>(
+<a class="ln" id="L224" href="#L224">224</a>          <span class="fn">Eq::congr</span>(
+<a class="ln" id="L225" href="#L225">225</a>            ⟦<span class="ty">Cons</span>(<span class="ty">Text::Mk</span>(□), <span class="ty">List::Nil</span>(&lt;<span class="ty">A</span>: <span class="ty">Text</span>&gt;))⟧,
+<a class="ln" id="L226" href="#L226">226</a>            <span class="fn">List::append_nil</span>(<a href="../src/frame.taut.html#L1380"><span class="fn">between</span></a>(<span class="fn">Text::bytes</span>(t), s, i))
+<a class="ln" id="L227" href="#L227">227</a>          ),
+<a class="ln" id="L228" href="#L228">228</a>          <span class="fn">Eq::sym</span>(<span class="fn">Eq::congr</span>(⟦<span class="ty">Cons</span>(□, <span class="ty">List::Nil</span>(&lt;<span class="ty">A</span>: <span class="ty">Text</span>&gt;))⟧, <a href="#L181"><span class="fn">cut_eq</span></a>(t, s, i)))
+<a class="ln" id="L229" href="#L229">229</a>        )
+<a class="ln" id="L230" href="#L230">230</a>      )
+<a class="ln" id="L231" href="#L231">231</a>    )
+<a class="ln" id="L232" href="#L232">232</a>  )
+<a class="ln" id="L233" href="#L233">233</a>}
+<a class="ln" id="L234" href="#L234">234</a>
+<a class="ln" id="L235" href="#L235">235</a><span class="kw">pub</span> <span class="kw">theorem</span> <span class="fn">sep_step</span>(
+<a class="ln" id="L236" href="#L236">236</a>  <span class="var">p</span>: <span class="ty">List</span>(<span class="ty">Nat</span>),
+<a class="ln" id="L237" href="#L237">237</a>  <span class="var">b</span>: <span class="ty">Nat</span>,
+<a class="ln" id="L238" href="#L238">238</a>  <span class="var">sep</span>: <span class="ty">Nat</span>,
+<a class="ln" id="L239" href="#L239">239</a>  <span class="var">q</span>: <span class="ty">List</span>(<span class="ty">List</span>(<span class="ty">Nat</span>)) × <span class="ty">List</span>(<span class="ty">Nat</span>),
+<a class="ln" id="L240" href="#L240">240</a>  <span class="var">hb</span>: (b == sep) = <span class="kw">true</span>
+<a class="ln" id="L241" href="#L241">241</a>): <span class="fn">Text::of_split</span>(<a href="#L51"><span class="fn">prep</span></a>(p, <span class="fn">Bytes::split_step</span>(b, sep, q))) = <span class="ty">Cons</span>(<span class="ty">Text::Mk</span>(p), <span class="fn">Text::of_split</span>(q)) {
+<a class="ln" id="L242" href="#L242">242</a>  <span class="kw">match</span> q {
+<a class="ln" id="L243" href="#L243">243</a>    #(a, c) =&gt; <span class="fn">Eq::trans</span>(
+<a class="ln" id="L244" href="#L244">244</a>      <span class="fn">Eq::congr</span>(
+<a class="ln" id="L245" href="#L245">245</a>        (<span class="var">y</span>: <span class="ty">Bool</span>) =&gt; <span class="fn">Text::of_split</span>(<a href="#L51"><span class="fn">prep</span></a>(p, ⊢ <span class="ty">List</span>(<span class="ty">List</span>(<span class="ty">Nat</span>)) × <span class="ty">List</span>(<span class="ty">Nat</span>) <span class="kw">from</span> <span class="kw">match</span> y {
+<a class="ln" id="L246" href="#L246">246</a>          <span class="kw">true</span> =&gt; #(<span class="ty">Cons</span>(c, a), <span class="ty">List::Nil</span>(&lt;<span class="ty">A</span>: <span class="ty">Nat</span>&gt;))
+<a class="ln" id="L247" href="#L247">247</a>          <span class="kw">false</span> =&gt; #(a, <span class="ty">Cons</span>(b, c))
+<a class="ln" id="L248" href="#L248">248</a>        })),
+<a class="ln" id="L249" href="#L249">249</a>        hb
+<a class="ln" id="L250" href="#L250">250</a>      ),
+<a class="ln" id="L251" href="#L251">251</a>      <span class="fn">Eq::congr</span>(⟦<span class="ty">Cons</span>(<span class="ty">Text::Mk</span>(□), <span class="fn">Text::of_bytes_list</span>(<span class="ty">Cons</span>(c, a)))⟧, <span class="fn">List::append_nil</span>(p))
+<a class="ln" id="L252" href="#L252">252</a>    )
+<a class="ln" id="L253" href="#L253">253</a>  }
+<a class="ln" id="L254" href="#L254">254</a>}
+<a class="ln" id="L255" href="#L255">255</a>
+<a class="ln" id="L256" href="#L256">256</a><span class="kw">pub</span> <span class="kw">theorem</span> <span class="fn">split_eq</span>(
+<a class="ln" id="L257" href="#L257">257</a>  <span class="var">t</span>: <span class="ty">Text</span>,
+<a class="ln" id="L258" href="#L258">258</a>  <span class="var">sep</span>: <span class="ty">Nat</span>,
+<a class="ln" id="L259" href="#L259">259</a>  <span class="var">s</span>: <span class="ty">Nat</span>,
+<a class="ln" id="L260" href="#L260">260</a>  <span class="var">i</span>: <span class="ty">Nat</span>,
+<a class="ln" id="L261" href="#L261">261</a>  <span class="var">k</span>: <span class="ty">Nat</span>,
+<a class="ln" id="L262" href="#L262">262</a>  <span class="var">hs</span>: (s &lt;= i) = <span class="kw">true</span>,
+<a class="ln" id="L263" href="#L263">263</a>  <span class="var">hn</span>: <a href="#L12"><span class="fn">nosep</span></a>(sep, <a href="../src/frame.taut.html#L1380"><span class="fn">between</span></a>(<span class="fn">Text::bytes</span>(t), s, i)) = <span class="kw">true</span>,
+<a class="ln" id="L264" href="#L264">264</a>  <span class="var">hk</span>: (<span class="fn">List::length</span>(<span class="fn">List::drop</span>(i, <span class="fn">Text::bytes</span>(t))) &lt;= k) = <span class="kw">true</span>
+<a class="ln" id="L265" href="#L265">265</a>): <a href="#L31"><span class="fn">split_from</span></a>(
+<a class="ln" id="L266" href="#L266">266</a>  t,
+<a class="ln" id="L267" href="#L267">267</a>  sep,
+<a class="ln" id="L268" href="#L268">268</a>  s,
+<a class="ln" id="L269" href="#L269">269</a>  i,
+<a class="ln" id="L270" href="#L270">270</a>  k
+<a class="ln" id="L271" href="#L271">271</a>) = <span class="fn">Text::of_split</span>(
+<a class="ln" id="L272" href="#L272">272</a>  <span class="fn">Bytes::split</span>(<span class="fn">List::append</span>(<a href="../src/frame.taut.html#L1380"><span class="fn">between</span></a>(<span class="fn">Text::bytes</span>(t), s, i), <span class="fn">List::drop</span>(i, <span class="fn">Text::bytes</span>(t))), sep)
+<a class="ln" id="L273" href="#L273">273</a>) {
+<a class="ln" id="L274" href="#L274">274</a>  ⊢ <a href="#L31"><span class="fn">split_from</span></a>(
+<a class="ln" id="L275" href="#L275">275</a>    t,
+<a class="ln" id="L276" href="#L276">276</a>    sep,
+<a class="ln" id="L277" href="#L277">277</a>    s,
+<a class="ln" id="L278" href="#L278">278</a>    i,
+<a class="ln" id="L279" href="#L279">279</a>    k
+<a class="ln" id="L280" href="#L280">280</a>  ) = <span class="fn">Text::of_split</span>(
+<a class="ln" id="L281" href="#L281">281</a>    <span class="fn">Bytes::split</span>(<span class="fn">List::append</span>(<a href="../src/frame.taut.html#L1380"><span class="fn">between</span></a>(<span class="fn">Text::bytes</span>(t), s, i), <span class="fn">List::drop</span>(i, <span class="fn">Text::bytes</span>(t))), sep)
+<a class="ln" id="L282" href="#L282">282</a>  ) <span class="kw">from</span> <span class="kw">match</span> k {
+<a class="ln" id="L283" href="#L283">283</a>    <span class="ty">Zero</span> =&gt; <a href="#L202"><span class="fn">end_eq</span></a>(t, sep, s, i, hn, <a href="#L167"><span class="fn">nil_of_len</span></a>(<span class="fn">List::drop</span>(i, <span class="fn">Text::bytes</span>(t)), hk))
+<a class="ln" id="L284" href="#L284">284</a>    <span class="ty">Succ</span>(k2) =&gt; <a href="../src/at.taut.html#L92"><span class="fn">opt_cases</span></a>(
+<a class="ln" id="L285" href="#L285">285</a>      (<span class="var">o</span>: <span class="ty">Option</span>(<span class="ty">Nat</span>)) =&gt; <span class="ty">Eq</span>(
+<a class="ln" id="L286" href="#L286">286</a>        <span class="ty">List</span>(<span class="ty">Text</span>),
+<a class="ln" id="L287" href="#L287">287</a>        ⊢ <span class="ty">List</span>(<span class="ty">Text</span>) <span class="kw">from</span> <span class="kw">match</span> o {
+<a class="ln" id="L288" href="#L288">288</a>          <span class="ty">None</span> =&gt; <span class="ty">Cons</span>(<a href="#L23"><span class="fn">cut_text</span></a>(t, s, i), <span class="ty">Nil</span>)
+<a class="ln" id="L289" href="#L289">289</a>          <span class="ty">Some</span>(b) =&gt; ⊢ <span class="ty">List</span>(<span class="ty">Text</span>) <span class="kw">from</span> <span class="kw">match</span> b == sep {
+<a class="ln" id="L290" href="#L290">290</a>            <span class="kw">true</span> =&gt; <span class="ty">Cons</span>(<a href="#L23"><span class="fn">cut_text</span></a>(t, s, i), <a href="#L31"><span class="fn">split_from</span></a>(t, sep, <span class="ty">Succ</span>(i), <span class="ty">Succ</span>(i), k2))
+<a class="ln" id="L291" href="#L291">291</a>            <span class="kw">false</span> =&gt; <a href="#L31"><span class="fn">split_from</span></a>(t, sep, s, <span class="ty">Succ</span>(i), k2)
+<a class="ln" id="L292" href="#L292">292</a>          }
+<a class="ln" id="L293" href="#L293">293</a>        },
+<a class="ln" id="L294" href="#L294">294</a>        <span class="fn">Text::of_split</span>(<span class="fn">Bytes::split</span>(<span class="fn">List::append</span>(<a href="../src/frame.taut.html#L1380"><span class="fn">between</span></a>(<span class="fn">Text::bytes</span>(t), s, i), <span class="fn">List::drop</span>(i, <span class="fn">Text::bytes</span>(t))), sep))
+<a class="ln" id="L295" href="#L295">295</a>      ),
+<a class="ln" id="L296" href="#L296">296</a>      <span class="fn">Text::byte</span>(t, i),
+<a class="ln" id="L297" href="#L297">297</a>      (<span class="var">oe</span>: <span class="fn">Text::byte</span>(t, i) = <span class="ty">None</span>) =&gt; <a href="#L202"><span class="fn">end_eq</span></a>(t, sep, s, i, hn, <a href="#L146"><span class="fn">drop_none</span></a>(<span class="fn">Text::bytes</span>(t), i, oe)),
+<a class="ln" id="L298" href="#L298">298</a>      (<span class="var">b</span>: <span class="ty">Nat</span>) =&gt; (<span class="var">oe</span>: <span class="fn">Text::byte</span>(t, i) = <span class="ty">Some</span>(b)) =&gt; <span class="fn">Eq::trans</span>(
+<a class="ln" id="L299" href="#L299">299</a>        ⊢ <span class="ty">Eq</span>(
+<a class="ln" id="L300" href="#L300">300</a>          <span class="ty">List</span>(<span class="ty">Text</span>),
+<a class="ln" id="L301" href="#L301">301</a>          ⊢ <span class="ty">List</span>(<span class="ty">Text</span>) <span class="kw">from</span> <span class="kw">match</span> b == sep {
+<a class="ln" id="L302" href="#L302">302</a>            <span class="kw">true</span> =&gt; <span class="ty">Cons</span>(<a href="#L23"><span class="fn">cut_text</span></a>(t, s, i), <a href="#L31"><span class="fn">split_from</span></a>(t, sep, <span class="ty">Succ</span>(i), <span class="ty">Succ</span>(i), k2))
+<a class="ln" id="L303" href="#L303">303</a>            <span class="kw">false</span> =&gt; <a href="#L31"><span class="fn">split_from</span></a>(t, sep, s, <span class="ty">Succ</span>(i), k2)
+<a class="ln" id="L304" href="#L304">304</a>          },
+<a class="ln" id="L305" href="#L305">305</a>          <span class="fn">Text::of_split</span>(<span class="fn">Bytes::split</span>(<span class="fn">List::append</span>(<a href="../src/frame.taut.html#L1380"><span class="fn">between</span></a>(<span class="fn">Text::bytes</span>(t), s, i), <span class="ty">Cons</span>(b, <span class="fn">List::drop</span>(<span class="ty">Succ</span>(i), <span class="fn">Text::bytes</span>(t)))), sep))
+<a class="ln" id="L306" href="#L306">306</a>        ) <span class="kw">from</span> <span class="kw">match</span> b == sep <span class="kw">eqn</span> ye {
+<a class="ln" id="L307" href="#L307">307</a>          <span class="kw">false</span> =&gt; <span class="fn">Eq::trans</span>(
+<a class="ln" id="L308" href="#L308">308</a>            <a href="#L256"><span class="fn">split_eq</span></a>(
+<a class="ln" id="L309" href="#L309">309</a>              t, sep, s, <span class="ty">Succ</span>(i), k2,
+<a class="ln" id="L310" href="#L310">310</a>              <span class="fn">Nat::le_trans</span>(s, i, <span class="ty">Succ</span>(i), hs, <span class="fn">Nat::le_succ</span>(i)),
+<a class="ln" id="L311" href="#L311">311</a>              <span class="fn">Eq::trans</span>(
+<a class="ln" id="L312" href="#L312">312</a>                <span class="fn">Eq::congr</span>(⟦<a href="#L12"><span class="fn">nosep</span></a>(sep, □)⟧, <a href="../src/frame.taut.html#L1425"><span class="fn">between_snoc</span></a>(<span class="fn">Text::bytes</span>(t), s, i, b, oe, hs)),
+<a class="ln" id="L313" href="#L313">313</a>                <a href="#L101"><span class="fn">nosep_snoc</span></a>(sep, <a href="../src/frame.taut.html#L1380"><span class="fn">between</span></a>(<span class="fn">Text::bytes</span>(t), s, i), b, hn, ye)
+<a class="ln" id="L314" href="#L314">314</a>              ),
+<a class="ln" id="L315" href="#L315">315</a>              <span class="fn">Eq::trans</span>(
+<a class="ln" id="L316" href="#L316">316</a>                <span class="fn">Eq::sym</span>(<span class="fn">Eq::congr</span>(⟦<span class="fn">List::length</span>(□) &lt;= <span class="ty">Succ</span>(k2)⟧, <a href="#L121"><span class="fn">drop_some</span></a>(<span class="fn">Text::bytes</span>(t), i, b, oe))),
+<a class="ln" id="L317" href="#L317">317</a>                hk
+<a class="ln" id="L318" href="#L318">318</a>              )
+<a class="ln" id="L319" href="#L319">319</a>            ),
+<a class="ln" id="L320" href="#L320">320</a>            <span class="fn">Eq::trans</span>(
+<a class="ln" id="L321" href="#L321">321</a>              <span class="fn">Eq::congr</span>(
+<a class="ln" id="L322" href="#L322">322</a>                ⟦<span class="fn">Text::of_split</span>(<span class="fn">Bytes::split</span>(<span class="fn">List::append</span>(□, <span class="fn">List::drop</span>(<span class="ty">Succ</span>(i), <span class="fn">Text::bytes</span>(t))), sep))⟧,
+<a class="ln" id="L323" href="#L323">323</a>                <a href="../src/frame.taut.html#L1425"><span class="fn">between_snoc</span></a>(<span class="fn">Text::bytes</span>(t), s, i, b, oe, hs)
+<a class="ln" id="L324" href="#L324">324</a>              ),
+<a class="ln" id="L325" href="#L325">325</a>              <span class="fn">Eq::congr</span>(
+<a class="ln" id="L326" href="#L326">326</a>                ⟦<span class="fn">Text::of_split</span>(<span class="fn">Bytes::split</span>(□, sep))⟧,
+<a class="ln" id="L327" href="#L327">327</a>                <span class="fn">List::append_assoc</span>(<a href="../src/frame.taut.html#L1380"><span class="fn">between</span></a>(<span class="fn">Text::bytes</span>(t), s, i), <span class="ty">Cons</span>(b, <span class="ty">Nil</span>), <span class="fn">List::drop</span>(<span class="ty">Succ</span>(i), <span class="fn">Text::bytes</span>(t)))
+<a class="ln" id="L328" href="#L328">328</a>              )
+<a class="ln" id="L329" href="#L329">329</a>            )
+<a class="ln" id="L330" href="#L330">330</a>          )
+<a class="ln" id="L331" href="#L331">331</a>          <span class="kw">true</span> =&gt; <span class="fn">Eq::trans</span>(
+<a class="ln" id="L332" href="#L332">332</a>            <span class="fn">Eq::congr</span>(⟦<span class="ty">Cons</span>(□, <a href="#L31"><span class="fn">split_from</span></a>(t, sep, <span class="ty">Succ</span>(i), <span class="ty">Succ</span>(i), k2))⟧, <a href="#L181"><span class="fn">cut_eq</span></a>(t, s, i)),
+<a class="ln" id="L333" href="#L333">333</a>            <span class="fn">Eq::trans</span>(
+<a class="ln" id="L334" href="#L334">334</a>              <span class="fn">Eq::congr</span>(
+<a class="ln" id="L335" href="#L335">335</a>                ⟦<span class="ty">Cons</span>(<span class="ty">Text::Mk</span>(<a href="../src/frame.taut.html#L1380"><span class="fn">between</span></a>(<span class="fn">Text::bytes</span>(t), s, i)), □)⟧,
+<a class="ln" id="L336" href="#L336">336</a>                <span class="fn">Eq::trans</span>(
+<a class="ln" id="L337" href="#L337">337</a>                  <a href="#L256"><span class="fn">split_eq</span></a>(
+<a class="ln" id="L338" href="#L338">338</a>                    t, sep, <span class="ty">Succ</span>(i), <span class="ty">Succ</span>(i), k2,
+<a class="ln" id="L339" href="#L339">339</a>                    <a href="../src/frame.taut.html#L1417"><span class="fn">le_self</span></a>(<span class="ty">Succ</span>(i)),
+<a class="ln" id="L340" href="#L340">340</a>                    <span class="fn">Eq::congr</span>(⟦<a href="#L12"><span class="fn">nosep</span></a>(sep, □)⟧, <a href="../src/frame.taut.html#L1393"><span class="fn">between_same</span></a>(<span class="fn">Text::bytes</span>(t), <span class="ty">Succ</span>(i))),
+<a class="ln" id="L341" href="#L341">341</a>                    <span class="fn">Eq::trans</span>(
+<a class="ln" id="L342" href="#L342">342</a>                      <span class="fn">Eq::sym</span>(<span class="fn">Eq::congr</span>(⟦<span class="fn">List::length</span>(□) &lt;= <span class="ty">Succ</span>(k2)⟧, <a href="#L121"><span class="fn">drop_some</span></a>(<span class="fn">Text::bytes</span>(t), i, b, oe))),
+<a class="ln" id="L343" href="#L343">343</a>                      hk
+<a class="ln" id="L344" href="#L344">344</a>                    )
+<a class="ln" id="L345" href="#L345">345</a>                  ),
+<a class="ln" id="L346" href="#L346">346</a>                  <span class="fn">Eq::congr</span>(
+<a class="ln" id="L347" href="#L347">347</a>                    ⟦<span class="fn">Text::of_split</span>(<span class="fn">Bytes::split</span>(<span class="fn">List::append</span>(□, <span class="fn">List::drop</span>(<span class="ty">Succ</span>(i), <span class="fn">Text::bytes</span>(t))), sep))⟧,
+<a class="ln" id="L348" href="#L348">348</a>                    <a href="../src/frame.taut.html#L1393"><span class="fn">between_same</span></a>(<span class="fn">Text::bytes</span>(t), <span class="ty">Succ</span>(i))
+<a class="ln" id="L349" href="#L349">349</a>                  )
+<a class="ln" id="L350" href="#L350">350</a>                )
+<a class="ln" id="L351" href="#L351">351</a>              ),
+<a class="ln" id="L352" href="#L352">352</a>              <span class="fn">Eq::sym</span>(
+<a class="ln" id="L353" href="#L353">353</a>                <span class="fn">Eq::trans</span>(
+<a class="ln" id="L354" href="#L354">354</a>                  <span class="fn">Eq::congr</span>(
+<a class="ln" id="L355" href="#L355">355</a>                    ⟦<span class="fn">Text::of_split</span>(□)⟧,
+<a class="ln" id="L356" href="#L356">356</a>                    <a href="#L82"><span class="fn">split_prefix</span></a>(sep, <a href="../src/frame.taut.html#L1380"><span class="fn">between</span></a>(<span class="fn">Text::bytes</span>(t), s, i), <span class="ty">Cons</span>(b, <span class="fn">List::drop</span>(<span class="ty">Succ</span>(i), <span class="fn">Text::bytes</span>(t))), hn)
+<a class="ln" id="L357" href="#L357">357</a>                  ),
+<a class="ln" id="L358" href="#L358">358</a>                  <a href="#L235"><span class="fn">sep_step</span></a>(<a href="../src/frame.taut.html#L1380"><span class="fn">between</span></a>(<span class="fn">Text::bytes</span>(t), s, i), b, sep, <span class="fn">Bytes::split</span>(<span class="fn">List::drop</span>(<span class="ty">Succ</span>(i), <span class="fn">Text::bytes</span>(t)), sep), ye)
+<a class="ln" id="L359" href="#L359">359</a>                )
+<a class="ln" id="L360" href="#L360">360</a>              )
+<a class="ln" id="L361" href="#L361">361</a>            )
+<a class="ln" id="L362" href="#L362">362</a>          )
+<a class="ln" id="L363" href="#L363">363</a>        },
+<a class="ln" id="L364" href="#L364">364</a>        <span class="fn">Eq::sym</span>(
+<a class="ln" id="L365" href="#L365">365</a>          <span class="fn">Eq::congr</span>(
+<a class="ln" id="L366" href="#L366">366</a>            ⟦<span class="fn">Text::of_split</span>(<span class="fn">Bytes::split</span>(<span class="fn">List::append</span>(<a href="../src/frame.taut.html#L1380"><span class="fn">between</span></a>(<span class="fn">Text::bytes</span>(t), s, i), □), sep))⟧,
+<a class="ln" id="L367" href="#L367">367</a>            <a href="#L121"><span class="fn">drop_some</span></a>(<span class="fn">Text::bytes</span>(t), i, b, oe)
+<a class="ln" id="L368" href="#L368">368</a>          )
+<a class="ln" id="L369" href="#L369">369</a>        )
+<a class="ln" id="L370" href="#L370">370</a>      )
+<a class="ln" id="L371" href="#L371">371</a>    )
+<a class="ln" id="L372" href="#L372">372</a>  }
+<a class="ln" id="L373" href="#L373">373</a>}
+<a class="ln" id="L374" href="#L374">374</a>
+<a class="ln" id="L375" href="#L375">375</a><span class="kw">pub</span> <span class="kw">theorem</span> <span class="fn">split_text_eq</span>(<span class="var">t</span>: <span class="ty">Text</span>, <span class="var">sep</span>: <span class="ty">Nat</span>): <a href="#L45"><span class="fn">split_text</span></a>(t, sep) = <span class="fn">Text::split_on</span>(t, sep) {
+<a class="ln" id="L376" href="#L376">376</a>  <span class="fn">Eq::trans</span>(
+<a class="ln" id="L377" href="#L377">377</a>    <a href="#L256"><span class="fn">split_eq</span></a>(
+<a class="ln" id="L378" href="#L378">378</a>      t,
+<a class="ln" id="L379" href="#L379">379</a>      sep,
+<a class="ln" id="L380" href="#L380">380</a>      <span class="num">0</span>,
+<a class="ln" id="L381" href="#L381">381</a>      <span class="num">0</span>,
+<a class="ln" id="L382" href="#L382">382</a>      <span class="fn">Text::len</span>(t),
+<a class="ln" id="L383" href="#L383">383</a>      <span class="ty">Refl</span>,
+<a class="ln" id="L384" href="#L384">384</a>      <span class="fn">Eq::congr</span>(⟦<a href="#L12"><span class="fn">nosep</span></a>(sep, □)⟧, <a href="../src/frame.taut.html#L1393"><span class="fn">between_same</span></a>(<span class="fn">Text::bytes</span>(t), <span class="num">0</span>)),
+<a class="ln" id="L385" href="#L385">385</a>      <a href="../src/frame.taut.html#L1417"><span class="fn">le_self</span></a>(<span class="fn">List::length</span>(<span class="fn">Text::bytes</span>(t)))
+<a class="ln" id="L386" href="#L386">386</a>    ),
+<a class="ln" id="L387" href="#L387">387</a>    <span class="fn">Eq::congr</span>(
+<a class="ln" id="L388" href="#L388">388</a>      ⟦<span class="fn">Text::of_split</span>(<span class="fn">Bytes::split</span>(<span class="fn">List::append</span>(□, <span class="fn">Text::bytes</span>(t)), sep))⟧,
+<a class="ln" id="L389" href="#L389">389</a>      <a href="../src/frame.taut.html#L1393"><span class="fn">between_same</span></a>(<span class="fn">Text::bytes</span>(t), <span class="num">0</span>)
+<a class="ln" id="L390" href="#L390">390</a>    )
+<a class="ln" id="L391" href="#L391">391</a>  )
+<a class="ln" id="L392" href="#L392">392</a>}
+</code></pre>
+</html>

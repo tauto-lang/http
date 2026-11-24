@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>examples/users.taut</title><style>:root{color-scheme:light dark;--bg:#fff;--fg:#1f2328;--mut:#6e7781;--kw:#cf222e;--str:#0a3069;--num:#0550ae;--com:#6e7781;--mac:#8250df;--ty:#953800;--fn:#6639ba;--var:#116329;--op:#0550ae;--link:#0969da;--sel:#fff8c5}@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--mut:#7d8590;--kw:#ff7b72;--str:#a5d6ff;--num:#79c0ff;--com:#8b949e;--mac:#d2a8ff;--ty:#ffa657;--fn:#d2a8ff;--var:#7ee787;--op:#79c0ff;--link:#58a6ff;--sel:#3a3000}}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,sans-serif}nav,main{padding:8px 16px}a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}pre{margin:0;padding:8px 0;font:13px/1.5 ui-monospace,monospace;overflow-x:auto}pre a{color:inherit}pre a[href^="#"],pre a[href*=".html"]{text-decoration:underline dotted}.ln{display:inline-block;width:5ch;margin-right:2ch;text-align:right;color:var(--mut);user-select:none;text-decoration:none!important}.ln:target{background:var(--sel)}.kw{color:var(--kw)}.str{color:var(--str)}.num{color:var(--num)}.com{color:var(--com)}.mac{color:var(--mac)}.ty{color:var(--ty)}.fn{color:var(--fn)}.var{color:var(--var)}.op{color:var(--op)}ul{list-style:none;padding-left:0}li li{padding-left:2ch}.kind{color:var(--mut)}</style>
+<nav><a href="../index.html">index</a> / examples/users.taut</nav>
+<pre><code><a class="ln" id="L1" href="#L1">1</a><span class="kw">import</span> <span class="str">&quot;../../http/src/status.taut&quot;</span> { <span class="ty">Status</span> }
+<a class="ln" id="L2" href="#L2">2</a><span class="kw">import</span> <span class="str">&quot;../src/app.taut&quot;</span> { render }
+<a class="ln" id="L3" href="#L3">3</a><span class="kw">import</span> <span class="str">&quot;../src/effects.taut&quot;</span> { get_headers }
+<a class="ln" id="L4" href="#L4">4</a><span class="kw">import</span> <span class="str">&quot;../src/response.taut&quot;</span> { <span class="ty">Response</span>, text_response }
+<a class="ln" id="L5" href="#L5">5</a><span class="kw">import</span> <span class="str">&quot;../src/router.taut&quot;</span> { router }
+<a class="ln" id="L6" href="#L6">6</a>
+<a class="ln" id="L7" href="#L7">7</a><span class="com">// A user id is any segment that is not empty. A type is read from a path segment by its</span>
+<a class="ln" id="L8" href="#L8">8</a><span class="com">// `from_path`, written next to it as here; a type of another package is wrapped in a</span>
+<a class="ln" id="L9" href="#L9">9</a><span class="com">// newtype like this one to give it one.</span>
+<a class="ln" id="L10" href="#L10">10</a><span class="kw">struct</span> <span class="ty">UserId</span> { raw: <span class="ty">Text</span> }
+<a class="ln" id="L11" href="#L11">11</a>
+<a class="ln" id="L12" href="#L12">12</a><span class="kw">fn</span> <span class="fn">UserId::from_path</span>(<span class="var">segment</span>: <span class="ty">Text</span>): <span class="ty">Option</span>(<a href="#L10"><span class="ty">UserId</span></a>) {
+<a class="ln" id="L13" href="#L13">13</a>  <span class="kw">if</span> segment == <span class="str">&quot;&quot;</span> { <span class="ty">None</span> } <span class="kw">else</span> { <span class="ty">Some</span>(<span class="ty">UserId</span> { raw: segment }) }
+<a class="ln" id="L14" href="#L14">14</a>}
+<a class="ln" id="L15" href="#L15">15</a>
+<a class="ln" id="L16" href="#L16">16</a><span class="com">// Who may administer users. A handler that needs it performs `admin()`;</span>
+<a class="ln" id="L17" href="#L17">17</a><span class="com">// the `auth` middleware answers it, and only then reads `authorization`.</span>
+<a class="ln" id="L18" href="#L18">18</a><span class="kw">struct</span> <span class="ty">Admin</span> { token: <span class="ty">Text</span> }
+<a class="ln" id="L19" href="#L19">19</a>
+<a class="ln" id="L20" href="#L20">20</a><span class="kw">effect</span> <span class="fn">admin</span>(): <a href="#L18"><span class="ty">Admin</span></a>
+<a class="ln" id="L21" href="#L21">21</a>
+<a class="ln" id="L22" href="#L22">22</a><span class="kw">fn</span> <span class="fn">bearer</span>(<span class="var">v</span>: <span class="ty">Text</span>): <span class="ty">Option</span>(<span class="ty">Text</span>) {
+<a class="ln" id="L23" href="#L23">23</a>  <span class="kw">if</span> <span class="fn">Text::slice</span>(
+<a class="ln" id="L24" href="#L24">24</a>    v,
+<a class="ln" id="L25" href="#L25">25</a>    <span class="num">0</span>,
+<a class="ln" id="L26" href="#L26">26</a>    <span class="num">7</span>
+<a class="ln" id="L27" href="#L27">27</a>  ) == <span class="ty">Some</span>(<span class="str">&quot;Bearer &quot;</span>) &amp;&amp; <span class="fn">Text::len</span>(v) &gt; <span class="num">7</span> { <span class="fn">Text::slice</span>(v, <span class="num">7</span>, <span class="fn">Text::len</span>(v)) } <span class="kw">else</span> { <span class="ty">None</span> }
+<a class="ln" id="L28" href="#L28">28</a>}
+<a class="ln" id="L29" href="#L29">29</a>
+<a class="ln" id="L30" href="#L30">30</a><span class="kw">fn</span> <span class="fn">auth</span>&lt;!e&gt;(<span class="var">k</span>: () -&gt; <a href="../src/response.taut.html#L11"><span class="ty">Response</span></a> ! {admin} ∪ e): <a href="../src/response.taut.html#L11"><span class="ty">Response</span></a> ! {get_headers} ∪ e {
+<a class="ln" id="L31" href="#L31">31</a>  <span class="kw">handle</span> { <span class="fn">k</span>() } <span class="kw">with</span> {
+<a class="ln" id="L32" href="#L32">32</a>    <span class="fn">admin</span>(), cont =&gt; <span class="kw">match</span> <span class="kw">perform</span> <span class="fn">get_headers</span>(<span class="str">&quot;authorization&quot;</span>) {
+<a class="ln" id="L33" href="#L33">33</a>      <span class="ty">None</span> =&gt; <a href="../src/response.taut.html#L17"><span class="fn">text_response</span></a>(<span class="fn">Status::unauthorized</span>(), <span class="str">&quot;unauthorized&quot;</span>)
+<a class="ln" id="L34" href="#L34">34</a>      <span class="ty">Some</span>(v) =&gt; <span class="kw">match</span> <a href="#L22"><span class="fn">bearer</span></a>(v) {
+<a class="ln" id="L35" href="#L35">35</a>        <span class="ty">None</span> =&gt; <a href="../src/response.taut.html#L17"><span class="fn">text_response</span></a>(<span class="fn">Status::forbidden</span>(), <span class="str">&quot;forbidden&quot;</span>)
+<a class="ln" id="L36" href="#L36">36</a>        <span class="ty">Some</span>(t) =&gt; <span class="fn">cont</span>(<span class="ty">Admin</span> { token: t })
+<a class="ln" id="L37" href="#L37">37</a>      }
+<a class="ln" id="L38" href="#L38">38</a>    }
+<a class="ln" id="L39" href="#L39">39</a>  }
+<a class="ln" id="L40" href="#L40">40</a>}
+<a class="ln" id="L41" href="#L41">41</a>
+<a class="ln" id="L42" href="#L42">42</a><span class="kw">fn</span> <span class="fn">trace</span>&lt;!e&gt;(<span class="var">k</span>: () -&gt; <a href="../src/response.taut.html#L11"><span class="ty">Response</span></a> ! e): <a href="../src/response.taut.html#L11"><span class="ty">Response</span></a> ! e {
+<a class="ln" id="L43" href="#L43">43</a>  <span class="fn">k</span>()
+<a class="ln" id="L44" href="#L44">44</a>}
+<a class="ln" id="L45" href="#L45">45</a>
+<a class="ln" id="L46" href="#L46">46</a><span class="kw">fn</span> <span class="fn">global_state</span>&lt;!e&gt;(<span class="var">k</span>: () -&gt; <a href="../src/response.taut.html#L11"><span class="ty">Response</span></a> ! e): <a href="../src/response.taut.html#L11"><span class="ty">Response</span></a> ! e {
+<a class="ln" id="L47" href="#L47">47</a>  <span class="fn">k</span>()
+<a class="ln" id="L48" href="#L48">48</a>}
+<a class="ln" id="L49" href="#L49">49</a>
+<a class="ln" id="L50" href="#L50">50</a><span class="kw">fn</span> <span class="fn">user_db</span>&lt;!e&gt;(<span class="var">k</span>: () -&gt; <a href="../src/response.taut.html#L11"><span class="ty">Response</span></a> ! e): <a href="../src/response.taut.html#L11"><span class="ty">Response</span></a> ! e {
+<a class="ln" id="L51" href="#L51">51</a>  <span class="fn">k</span>()
+<a class="ln" id="L52" href="#L52">52</a>}
+<a class="ln" id="L53" href="#L53">53</a>
+<a class="ln" id="L54" href="#L54">54</a><span class="kw">fn</span> <span class="fn">home</span>(): <a href="../src/response.taut.html#L11"><span class="ty">Response</span></a> {
+<a class="ln" id="L55" href="#L55">55</a>  <a href="../src/response.taut.html#L17"><span class="fn">text_response</span></a>(<span class="fn">Status::ok</span>(), <span class="str">&quot;home&quot;</span>)
+<a class="ln" id="L56" href="#L56">56</a>}
+<a class="ln" id="L57" href="#L57">57</a>
+<a class="ln" id="L58" href="#L58">58</a><span class="kw">fn</span> <span class="fn">healthz</span>(): <a href="../src/response.taut.html#L11"><span class="ty">Response</span></a> {
+<a class="ln" id="L59" href="#L59">59</a>  <a href="../src/response.taut.html#L17"><span class="fn">text_response</span></a>(<span class="fn">Status::ok</span>(), <span class="str">&quot;ok&quot;</span>)
+<a class="ln" id="L60" href="#L60">60</a>}
+<a class="ln" id="L61" href="#L61">61</a>
+<a class="ln" id="L62" href="#L62">62</a><span class="kw">fn</span> <span class="fn">users</span>(): <a href="../src/response.taut.html#L11"><span class="ty">Response</span></a> {
+<a class="ln" id="L63" href="#L63">63</a>  <a href="../src/response.taut.html#L17"><span class="fn">text_response</span></a>(<span class="fn">Status::ok</span>(), <span class="str">&quot;ada\nbea&quot;</span>)
+<a class="ln" id="L64" href="#L64">64</a>}
+<a class="ln" id="L65" href="#L65">65</a>
+<a class="ln" id="L66" href="#L66">66</a><span class="kw">fn</span> <span class="fn">create</span>(): <a href="../src/response.taut.html#L11"><span class="ty">Response</span></a> ! {admin} {
+<a class="ln" id="L67" href="#L67">67</a>  <span class="kw">let</span> a := <span class="kw">perform</span> <span class="fn">admin</span>()
+<a class="ln" id="L68" href="#L68">68</a>  <a href="../src/response.taut.html#L17"><span class="fn">text_response</span></a>(<span class="fn">Status::created</span>(), <span class="fn">concat</span>(<span class="str">&quot;created by &quot;</span>, a.token))
+<a class="ln" id="L69" href="#L69">69</a>}
+<a class="ln" id="L70" href="#L70">70</a>
+<a class="ln" id="L71" href="#L71">71</a><span class="kw">fn</span> <span class="fn">user</span>(<span class="var">u</span>: { user_id: <a href="#L10"><span class="ty">UserId</span></a> }): <a href="../src/response.taut.html#L11"><span class="ty">Response</span></a> {
+<a class="ln" id="L72" href="#L72">72</a>  <a href="../src/response.taut.html#L17"><span class="fn">text_response</span></a>(<span class="fn">Status::ok</span>(), u.user_id.raw)
+<a class="ln" id="L73" href="#L73">73</a>}
+<a class="ln" id="L74" href="#L74">74</a>
+<a class="ln" id="L75" href="#L75">75</a><span class="kw">fn</span> <span class="fn">remove</span>(<span class="var">u</span>: { user_id: <a href="#L10"><span class="ty">UserId</span></a> }): <a href="../src/response.taut.html#L11"><span class="ty">Response</span></a> ! {admin} {
+<a class="ln" id="L76" href="#L76">76</a>  <span class="kw">let</span> a := <span class="kw">perform</span> <span class="fn">admin</span>()
+<a class="ln" id="L77" href="#L77">77</a>  <a href="../src/response.taut.html#L17"><span class="fn">text_response</span></a>(<span class="fn">Status::ok</span>(), <span class="fn">concat</span>(u.user_id.raw, <span class="fn">concat</span>(<span class="str">&quot; removed by &quot;</span>, a.token)))
+<a class="ln" id="L78" href="#L78">78</a>}
+<a class="ln" id="L79" href="#L79">79</a>
+<a class="ln" id="L80" href="#L80">80</a><span class="kw">fn</span> <span class="fn">missing</span>(): <a href="../src/response.taut.html#L11"><span class="ty">Response</span></a> {
+<a class="ln" id="L81" href="#L81">81</a>  <a href="../src/response.taut.html#L17"><span class="fn">text_response</span></a>(<span class="fn">Status::not_found</span>(), <span class="str">&quot;not found&quot;</span>)
+<a class="ln" id="L82" href="#L82">82</a>}
+<a class="ln" id="L83" href="#L83">83</a>
+<a class="ln" id="L84" href="#L84">84</a><span class="mac">router!</span>(```
+<a class="ln" id="L85" href="#L85">85</a>  <span class="num">Route</span> <span class="op">!</span> <span class="op">{</span><span class="op">}</span>
+<a class="ln" id="L86" href="#L86">86</a>  <span class="kw">middleware</span><span class="op">:</span> <span class="fn">trace</span><span class="op">,</span> <span class="fn">global_state</span><span class="op">,</span> <span class="fn">auth</span>
+<a class="ln" id="L87" href="#L87">87</a>  <span class="str">/</span> <span class="num">Home</span> <span class="kw">get</span><span class="op">:</span> <span class="fn">home</span>
+<a class="ln" id="L88" href="#L88">88</a>  <span class="str">/healthz</span> <span class="num">Healthz</span> <span class="kw">get</span><span class="op">:</span> <span class="fn">healthz</span>
+<a class="ln" id="L89" href="#L89">89</a>  <span class="str">/users</span> <span class="num">Users</span> <span class="kw">get</span><span class="op">:</span> <span class="fn">users</span> <span class="kw">post</span><span class="op">:</span> <span class="fn">create</span> <span class="op">{</span>
+<a class="ln" id="L90" href="#L90">90</a>    <span class="kw">middleware</span><span class="op">:</span> <span class="fn">user_db</span>
+<a class="ln" id="L91" href="#L91">91</a>    <span class="str">/</span><span class="op">{</span><span class="var">user_id</span><span class="op">:</span> <span class="ty">UserId</span><span class="op">}</span> <span class="num">User</span> <span class="kw">get</span><span class="op">:</span> <span class="fn">user</span> <span class="kw">delete</span><span class="op">:</span> <span class="fn">remove</span>
+<a class="ln" id="L92" href="#L92">92</a>  <span class="op">}</span>
+<a class="ln" id="L93" href="#L93">93</a>  <span class="str">/*</span> <span class="num">NotFound</span> <span class="kw">any</span><span class="op">:</span> <span class="fn">missing</span>
+<a class="ln" id="L94" href="#L94">94</a>  ```) =&gt; <span class="kw">enum</span> <span class="ty">Route</span>, <span class="kw">fn</span> route, <span class="kw">fn</span> handler
+<a class="ln" id="L95" href="#L95">95</a>
+<a class="ln" id="L96" href="#L96">96</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">users_answer</span>(<span class="var">raw</span>: <span class="ty">Text</span>): <span class="ty">Text</span> {
+<a class="ln" id="L97" href="#L97">97</a>  <a href="../src/app.taut.html#L9"><span class="fn">render</span></a>(raw, route, handler)
+<a class="ln" id="L98" href="#L98">98</a>}
+</code></pre>
+</html>

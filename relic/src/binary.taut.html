@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>src/binary.taut</title><style>:root{color-scheme:light dark;--bg:#fff;--fg:#1f2328;--mut:#6e7781;--kw:#cf222e;--str:#0a3069;--num:#0550ae;--com:#6e7781;--mac:#8250df;--ty:#953800;--fn:#6639ba;--var:#116329;--op:#0550ae;--link:#0969da;--sel:#fff8c5}@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--mut:#7d8590;--kw:#ff7b72;--str:#a5d6ff;--num:#79c0ff;--com:#8b949e;--mac:#d2a8ff;--ty:#ffa657;--fn:#d2a8ff;--var:#7ee787;--op:#79c0ff;--link:#58a6ff;--sel:#3a3000}}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,sans-serif}nav,main{padding:8px 16px}a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}pre{margin:0;padding:8px 0;font:13px/1.5 ui-monospace,monospace;overflow-x:auto}pre a{color:inherit}pre a[href^="#"],pre a[href*=".html"]{text-decoration:underline dotted}.ln{display:inline-block;width:5ch;margin-right:2ch;text-align:right;color:var(--mut);user-select:none;text-decoration:none!important}.ln:target{background:var(--sel)}.kw{color:var(--kw)}.str{color:var(--str)}.num{color:var(--num)}.com{color:var(--com)}.mac{color:var(--mac)}.ty{color:var(--ty)}.fn{color:var(--fn)}.var{color:var(--var)}.op{color:var(--op)}ul{list-style:none;padding-left:0}li li{padding-left:2ch}.kind{color:var(--mut)}</style>
+<nav><a href="../index.html">index</a> / src/binary.taut</nav>
+<pre><code><a class="ln" id="L1" href="#L1">1</a><span class="kw">import</span> std::builtin::os {
+<a class="ln" id="L2" href="#L2">2</a>  <span class="ty">Host</span>,
+<a class="ln" id="L3" href="#L3">3</a>  <span class="ty">IoError</span>,
+<a class="ln" id="L4" href="#L4">4</a>  <span class="ty">Shutdown</span>,
+<a class="ln" id="L5" href="#L5">5</a>  <span class="ty">TcpAccepted</span>,
+<a class="ln" id="L6" href="#L6">6</a>  <span class="ty">TcpListener</span>,
+<a class="ln" id="L7" href="#L7">7</a>  <span class="ty">TcpRead</span>,
+<a class="ln" id="L8" href="#L8">8</a>  <span class="ty">TcpStream</span>,
+<a class="ln" id="L9" href="#L9">9</a>  <span class="ty">TcpWritten</span>,
+<a class="ln" id="L10" href="#L10">10</a>  io_message,
+<a class="ln" id="L11" href="#L11">11</a>  monotonic_clock,
+<a class="ln" id="L12" href="#L12">12</a>  sleep,
+<a class="ln" id="L13" href="#L13">13</a>  stderr,
+<a class="ln" id="L14" href="#L14">14</a>  stop,
+<a class="ln" id="L15" href="#L15">15</a>  tcp_accept,
+<a class="ln" id="L16" href="#L16">16</a>  tcp_close,
+<a class="ln" id="L17" href="#L17">17</a>  tcp_listen,
+<a class="ln" id="L18" href="#L18">18</a>  tcp_read,
+<a class="ln" id="L19" href="#L19">19</a>  tcp_shutdown,
+<a class="ln" id="L20" href="#L20">20</a>  tcp_write
+<a class="ln" id="L21" href="#L21">21</a>}
+<a class="ln" id="L22" href="#L22">22</a><span class="kw">import</span> std::builtin::par { <span class="ty">Mutex</span>, mutex_claim, mutex_new, mutex_take_claimed, wait }
+<a class="ln" id="L23" href="#L23">23</a><span class="kw">import</span> <span class="str">&quot;../../http/src/http.taut&quot;</span> { reason_in, reasons }
+<a class="ln" id="L24" href="#L24">24</a><span class="kw">import</span> <span class="str">&quot;conn.taut&quot;</span> { accept_retry_ms }
+<a class="ln" id="L25" href="#L25">25</a>
+<a class="ln" id="L26" href="#L26">26</a><span class="com">// A small HTTP/1.1 server for immutable binary assets. One request per connection.</span>
+<a class="ln" id="L27" href="#L27">27</a><span class="com">// The callback is pure: callers can preload files before opening the listener.</span>
+<a class="ln" id="L28" href="#L28">28</a><span class="kw">pub(open)</span> <span class="kw">struct</span>(<span class="kw">shared</span>) <span class="ty">BinaryRequest</span> { method: <span class="ty">Text</span>, path: <span class="ty">Text</span> }
+<a class="ln" id="L29" href="#L29">29</a><span class="kw">pub(open)</span> <span class="kw">struct</span>(<span class="kw">shared</span>) <span class="ty">BinaryResponse</span> { status: u64, content_type: <span class="ty">Text</span>, body: <span class="ty">Bytes</span> }
+<a class="ln" id="L30" href="#L30">30</a>
+<a class="ln" id="L31" href="#L31">31</a><span class="com">// A count that cannot go on (`overflow`) is answered on the safe side: the</span>
+<a class="ln" id="L32" href="#L32">32</a><span class="com">// header is refused, the request is not complete.</span>
+<a class="ln" id="L33" href="#L33">33</a><span class="kw">fn</span> <span class="fn">has_line_break</span>(<span class="var">t</span>: <span class="ty">Text</span>): <span class="ty">Bool</span> ! {div} {
+<a class="ln" id="L34" href="#L34">34</a>  <span class="kw">handle</span> {
+<a class="ln" id="L35" href="#L35">35</a>    <span class="kw">var</span> i := <span class="num">0</span>
+<a class="ln" id="L36" href="#L36">36</a>    <span class="kw">var</span> found := <span class="kw">false</span>
+<a class="ln" id="L37" href="#L37">37</a>    <span class="kw">while</span> i &lt; <span class="fn">Text::len</span>(t) {
+<a class="ln" id="L38" href="#L38">38</a>      <span class="kw">match</span> <span class="fn">Text::byte</span>(t, i) {
+<a class="ln" id="L39" href="#L39">39</a>        <span class="ty">Some</span>(b) =&gt; <span class="kw">if</span> <span class="fn">U64::of_u8</span>(b) == <span class="num">10</span> || <span class="fn">U64::of_u8</span>(b) == <span class="num">13</span> { found := <span class="kw">true</span> } <span class="kw">else</span> { #() },
+<a class="ln" id="L40" href="#L40">40</a>        <span class="ty">None</span> =&gt; #()
+<a class="ln" id="L41" href="#L41">41</a>      }
+<a class="ln" id="L42" href="#L42">42</a>      i := i + <span class="num">1</span>
+<a class="ln" id="L43" href="#L43">43</a>    }
+<a class="ln" id="L44" href="#L44">44</a>    found
+<a class="ln" id="L45" href="#L45">45</a>  } <span class="kw">with</span> { <span class="fn">overflow</span>() =&gt; <span class="kw">true</span> }
+<a class="ln" id="L46" href="#L46">46</a>}
+<a class="ln" id="L47" href="#L47">47</a><span class="kw">fn</span> <span class="fn">complete</span>(<span class="var">t</span>: <span class="ty">Text</span>): <span class="ty">Bool</span> ! {div} {
+<a class="ln" id="L48" href="#L48">48</a>  <span class="kw">handle</span> {
+<a class="ln" id="L49" href="#L49">49</a>    <span class="kw">var</span> i := <span class="num">0</span>
+<a class="ln" id="L50" href="#L50">50</a>    <span class="kw">var</span> found := <span class="kw">false</span>
+<a class="ln" id="L51" href="#L51">51</a>    <span class="kw">while</span> i + <span class="num">3</span> &lt; <span class="fn">Text::len</span>(t) {
+<a class="ln" id="L52" href="#L52">52</a>      <span class="kw">if</span> <a href="#L224"><span class="fn">slice_text</span></a>(t, i, i+<span class="num">4</span>) == <span class="str">&quot;\r\n\r\n&quot;</span> { found := <span class="kw">true</span> } <span class="kw">else</span> { #() }
+<a class="ln" id="L53" href="#L53">53</a>      i := i + <span class="num">1</span>
+<a class="ln" id="L54" href="#L54">54</a>    }
+<a class="ln" id="L55" href="#L55">55</a>    found
+<a class="ln" id="L56" href="#L56">56</a>  } <span class="kw">with</span> { <span class="fn">overflow</span>() =&gt; <span class="kw">false</span> }
+<a class="ln" id="L57" href="#L57">57</a>}
+<a class="ln" id="L58" href="#L58">58</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">binary_wire</span>(<span class="var">r</span>: <a href="#L29"><span class="ty">BinaryResponse</span></a>, <span class="var">head</span>: <span class="ty">Bool</span>): <span class="ty">Bytes</span> ! {div} {
+<a class="ln" id="L59" href="#L59">59</a>  <span class="kw">let</span> safe := <span class="kw">if</span> <a href="#L33"><span class="fn">has_line_break</span></a>(r.content_type) {
+<a class="ln" id="L60" href="#L60">60</a>    <span class="ty">BinaryResponse</span> {
+<a class="ln" id="L61" href="#L61">61</a>      status: <span class="num">500</span>,
+<a class="ln" id="L62" href="#L62">62</a>      content_type: <span class="str">&quot;text/plain&quot;</span>,
+<a class="ln" id="L63" href="#L63">63</a>      body: <span class="fn">Bytes::of_text</span>(<span class="str">&quot;Invalid response header&quot;</span>)
+<a class="ln" id="L64" href="#L64">64</a>    }
+<a class="ln" id="L65" href="#L65">65</a>  } <span class="kw">else</span> { r }
+<a class="ln" id="L66" href="#L66">66</a>  <span class="com">// The reason phrase of the status (RFC 9110); empty for a status without one, which</span>
+<a class="ln" id="L67" href="#L67">67</a>  <span class="com">// HTTP/1.1 allows.</span>
+<a class="ln" id="L68" href="#L68">68</a>  <span class="kw">let</span> reason := <span class="fn">reason_in</span>(<span class="fn">Nat::of_u64</span>(safe.status), <span class="fn">reasons</span>())
+<a class="ln" id="L69" href="#L69">69</a>  <span class="kw">let</span> prefix := <span class="fn">Bytes::of_text</span>(
+<a class="ln" id="L70" href="#L70">70</a>    <a href="#L229"><span class="fn">join_text</span></a>(
+<a class="ln" id="L71" href="#L71">71</a>      [
+<a class="ln" id="L72" href="#L72">72</a>        <span class="str">&quot;HTTP/1.1 &quot;</span>,
+<a class="ln" id="L73" href="#L73">73</a>        <span class="fn">Text::of_u64</span>(safe.status),
+<a class="ln" id="L74" href="#L74">74</a>        <span class="str">&quot; &quot;</span>,
+<a class="ln" id="L75" href="#L75">75</a>        reason,
+<a class="ln" id="L76" href="#L76">76</a>        <span class="str">&quot;\r\ncontent-type: &quot;</span>,
+<a class="ln" id="L77" href="#L77">77</a>        safe.content_type,
+<a class="ln" id="L78" href="#L78">78</a>        <span class="str">&quot;\r\ncontent-length: &quot;</span>,
+<a class="ln" id="L79" href="#L79">79</a>        <span class="fn">Text::of_u64</span>(<span class="fn">Bytes::len</span>(safe.body)),
+<a class="ln" id="L80" href="#L80">80</a>        <span class="str">&quot;\r\nconnection: close\r\nx-content-type-options: nosniff\r\n\r\n&quot;</span>
+<a class="ln" id="L81" href="#L81">81</a>      ]
+<a class="ln" id="L82" href="#L82">82</a>    )
+<a class="ln" id="L83" href="#L83">83</a>  )
+<a class="ln" id="L84" href="#L84">84</a>  <span class="kw">if</span> head { prefix } <span class="kw">else</span> { <span class="fn">Bytes::concat</span>(prefix, safe.body) }
+<a class="ln" id="L85" href="#L85">85</a>}
+<a class="ln" id="L86" href="#L86">86</a><span class="kw">fn</span> <span class="fn">failure</span>(<span class="var">status</span>: u64): <a href="#L29"><span class="ty">BinaryResponse</span></a> {
+<a class="ln" id="L87" href="#L87">87</a>  <span class="ty">BinaryResponse</span> {
+<a class="ln" id="L88" href="#L88">88</a>    status: status,
+<a class="ln" id="L89" href="#L89">89</a>    content_type: <span class="str">&quot;text/plain&quot;</span>,
+<a class="ln" id="L90" href="#L90">90</a>    body: <span class="fn">Bytes::of_text</span>(<span class="str">&quot;Request rejected&quot;</span>)
+<a class="ln" id="L91" href="#L91">91</a>  }
+<a class="ln" id="L92" href="#L92">92</a>}
+<a class="ln" id="L93" href="#L93">93</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">binary_request</span>(<span class="var">raw</span>: <span class="ty">Text</span>): <span class="ty">Option</span>(<a href="#L28"><span class="ty">BinaryRequest</span></a>) ! {div} {
+<a class="ln" id="L94" href="#L94">94</a>  <span class="com">// Only the request line is considered; a bounded, complete head is required.</span>
+<a class="ln" id="L95" href="#L95">95</a>  <span class="kw">if</span> <span class="fn">not</span>(<a href="#L47"><span class="fn">complete</span></a>(raw)) { <span class="ty">None</span> } <span class="kw">else</span> {
+<a class="ln" id="L96" href="#L96">96</a>    <span class="kw">handle</span> {
+<a class="ln" id="L97" href="#L97">97</a>      <span class="kw">var</span> end := <span class="num">0</span>
+<a class="ln" id="L98" href="#L98">98</a>      <span class="kw">while</span> end &lt; <span class="fn">Text::len</span>(raw) &amp;&amp; <a href="#L224"><span class="fn">slice_text</span></a>(raw, end, end+<span class="num">1</span>) != <span class="str">&quot;\r&quot;</span> { end := end + <span class="num">1</span> }
+<a class="ln" id="L99" href="#L99">99</a>      <span class="kw">match</span> <span class="fn">words</span>(<a href="#L224"><span class="fn">slice_text</span></a>(raw, <span class="num">0</span>, end)) {
+<a class="ln" id="L100" href="#L100">100</a>        <span class="ty">Cons</span>(method, <span class="ty">Cons</span>(path, <span class="ty">Cons</span>(version, <span class="ty">Nil</span>))) =&gt; <span class="kw">if</span> version == <span class="str">&quot;HTTP/1.1&quot;</span> &amp;&amp; <a href="#L224"><span class="fn">slice_text</span></a>(
+<a class="ln" id="L101" href="#L101">101</a>          path,
+<a class="ln" id="L102" href="#L102">102</a>          <span class="num">0</span>,
+<a class="ln" id="L103" href="#L103">103</a>          <span class="num">1</span>
+<a class="ln" id="L104" href="#L104">104</a>        ) == <span class="str">&quot;/&quot;</span> { <span class="ty">Some</span>(<span class="ty">BinaryRequest</span> { method: method, path: path }) } <span class="kw">else</span> { <span class="ty">None</span> }
+<a class="ln" id="L105" href="#L105">105</a>        <span class="ty">Nil</span> =&gt; <span class="ty">None</span>
+<a class="ln" id="L106" href="#L106">106</a>        <span class="ty">Cons</span>(method, <span class="ty">Nil</span>) =&gt; <span class="ty">None</span>
+<a class="ln" id="L107" href="#L107">107</a>        <span class="ty">Cons</span>(method, <span class="ty">Cons</span>(path, <span class="ty">Nil</span>)) =&gt; <span class="ty">None</span>
+<a class="ln" id="L108" href="#L108">108</a>        <span class="ty">Cons</span>(method, <span class="ty">Cons</span>(path, <span class="ty">Cons</span>(version, <span class="ty">Cons</span>(extra, more)))) =&gt; <span class="ty">None</span>
+<a class="ln" id="L109" href="#L109">109</a>      }
+<a class="ln" id="L110" href="#L110">110</a>    } <span class="kw">with</span> { <span class="fn">overflow</span>() =&gt; <span class="ty">None</span> }
+<a class="ln" id="L111" href="#L111">111</a>  }
+<a class="ln" id="L112" href="#L112">112</a>}
+<a class="ln" id="L113" href="#L113">113</a><span class="com">// When a read or a write that starts now gives up: ten seconds on.</span>
+<a class="ln" id="L114" href="#L114">114</a><span class="kw">fn</span> <span class="fn">binary_deadline</span>(): i64 ! {monotonic_clock} {
+<a class="ln" id="L115" href="#L115">115</a>  <span class="kw">let</span> now := <span class="kw">perform</span> <span class="fn">monotonic_clock</span>()
+<a class="ln" id="L116" href="#L116">116</a>  <span class="kw">handle</span> { now + <span class="num">10000000000</span> } <span class="kw">with</span> { <span class="fn">overflow</span>() =&gt; now }
+<a class="ln" id="L117" href="#L117">117</a>}
+<a class="ln" id="L118" href="#L118">118</a>
+<a class="ln" id="L119" href="#L119">119</a><span class="com">// A connection given back with the text read from it.</span>
+<a class="ln" id="L120" href="#L120">120</a><span class="kw">struct</span>(<span class="kw">affine</span>) <span class="ty">Received</span> { conn: <span class="ty">TcpStream</span>, raw: <span class="ty">Text</span> }
+<a class="ln" id="L121" href="#L121">121</a>
+<a class="ln" id="L122" href="#L122">122</a><span class="kw">fn</span> <span class="fn">receive</span>(<span class="var">c</span>: <span class="ty">TcpStream</span>, <span class="var">deadline</span>: i64, <span class="var">raw</span>: <span class="ty">Text</span>): <a href="#L120"><span class="ty">Received</span></a> ! {tcp_read, div} {
+<a class="ln" id="L123" href="#L123">123</a>  <span class="kw">if</span> <span class="fn">Text::len</span>(raw) &gt; <span class="num">16384</span> { <span class="ty">Received</span> { conn: c, raw: raw } } <span class="kw">else</span> {
+<a class="ln" id="L124" href="#L124">124</a>    <span class="kw">match</span> <span class="kw">perform</span> <span class="fn">tcp_read</span>(c, <span class="num">4096</span>, <span class="ty">Some</span>(deadline)) {
+<a class="ln" id="L125" href="#L125">125</a>      <span class="ty">TcpRead</span> { stream, got } =&gt; <span class="kw">match</span> got {
+<a class="ln" id="L126" href="#L126">126</a>        <span class="ty">Ok</span>(bytes) =&gt; <span class="kw">if</span> <span class="fn">Bytes::len</span>(bytes) == <span class="num">0</span> { <span class="ty">Received</span> { conn: stream, raw: raw } } <span class="kw">else</span> {
+<a class="ln" id="L127" href="#L127">127</a>          <span class="kw">match</span> <span class="fn">Text::of_bytes</span>(bytes) {
+<a class="ln" id="L128" href="#L128">128</a>            <span class="ty">Some</span>(t) =&gt; {
+<a class="ln" id="L129" href="#L129">129</a>              <span class="kw">let</span> more := <span class="fn">concat</span>(raw, t)
+<a class="ln" id="L130" href="#L130">130</a>              <span class="kw">if</span> <a href="#L47"><span class="fn">complete</span></a>(more) { <span class="ty">Received</span> { conn: stream, raw: more } } <span class="kw">else</span> {
+<a class="ln" id="L131" href="#L131">131</a>                <a href="#L122"><span class="fn">receive</span></a>(stream, deadline, more)
+<a class="ln" id="L132" href="#L132">132</a>              }
+<a class="ln" id="L133" href="#L133">133</a>            }
+<a class="ln" id="L134" href="#L134">134</a>            <span class="ty">None</span> =&gt; <span class="ty">Received</span> { conn: stream, raw: raw }
+<a class="ln" id="L135" href="#L135">135</a>          }
+<a class="ln" id="L136" href="#L136">136</a>        }
+<a class="ln" id="L137" href="#L137">137</a>        <span class="ty">Err</span>(_) =&gt; <span class="ty">Received</span> { conn: stream, raw: raw }
+<a class="ln" id="L138" href="#L138">138</a>      }
+<a class="ln" id="L139" href="#L139">139</a>    }
+<a class="ln" id="L140" href="#L140">140</a>  }
+<a class="ln" id="L141" href="#L141">141</a>}
+<a class="ln" id="L142" href="#L142">142</a><span class="com">// What serving one connection asks of the host, besides what the callback asks.</span>
+<a class="ln" id="L143" href="#L143">143</a><span class="kw">pub</span> <span class="kw">effect</span> <span class="ty">BinaryIo</span> {
+<a class="ln" id="L144" href="#L144">144</a>  div,
+<a class="ln" id="L145" href="#L145">145</a>  monotonic_clock,
+<a class="ln" id="L146" href="#L146">146</a>  mutex_claim,
+<a class="ln" id="L147" href="#L147">147</a>  mutex_new,
+<a class="ln" id="L148" href="#L148">148</a>  mutex_take_claimed,
+<a class="ln" id="L149" href="#L149">149</a>  sleep,
+<a class="ln" id="L150" href="#L150">150</a>  stderr,
+<a class="ln" id="L151" href="#L151">151</a>  tcp_close,
+<a class="ln" id="L152" href="#L152">152</a>  tcp_read,
+<a class="ln" id="L153" href="#L153">153</a>  tcp_shutdown,
+<a class="ln" id="L154" href="#L154">154</a>  tcp_write,
+<a class="ln" id="L155" href="#L155">155</a>  wait
+<a class="ln" id="L156" href="#L156">156</a>}
+<a class="ln" id="L157" href="#L157">157</a>
+<a class="ln" id="L158" href="#L158">158</a><span class="kw">fn</span> <span class="fn">answer</span>&lt;!h: <span class="ty">Host</span>&gt;(<span class="var">c</span>: <span class="ty">TcpStream</span>, <span class="var">f</span>: (<a href="#L28"><span class="ty">BinaryRequest</span></a>) -&gt; <a href="#L29"><span class="ty">BinaryResponse</span></a> ! h): <span class="ty">Unit</span> ! {<span class="ty">BinaryIo</span>} ∪ h {
+<a class="ln" id="L159" href="#L159">159</a>  <span class="kw">match</span> <a href="#L122"><span class="fn">receive</span></a>(c, <a href="#L114"><span class="fn">binary_deadline</span></a>(), <span class="str">&quot;&quot;</span>) {
+<a class="ln" id="L160" href="#L160">160</a>    <span class="ty">Received</span> { conn, raw } =&gt; {
+<a class="ln" id="L161" href="#L161">161</a>      <span class="kw">let</span> request := <a href="#L93"><span class="fn">binary_request</span></a>(raw)
+<a class="ln" id="L162" href="#L162">162</a>      <span class="com">// The connection waits in a mutex while `f` runs: `f` may resume more than</span>
+<a class="ln" id="L163" href="#L163">163</a>      <span class="com">// once, and a connection may not be held across that.</span>
+<a class="ln" id="L164" href="#L164">164</a>      <span class="kw">let</span> parked := <span class="kw">perform</span> <span class="fn">mutex_new</span>(conn)
+<a class="ln" id="L165" href="#L165">165</a>      <span class="kw">let</span> response := <span class="kw">if</span> <span class="fn">Text::len</span>(raw) &gt; <span class="num">16384</span> { <a href="#L86"><span class="fn">failure</span></a>(<span class="num">431</span>) } <span class="kw">else</span> { <span class="kw">match</span> request {
+<a class="ln" id="L166" href="#L166">166</a>          <span class="ty">Some</span>(req) =&gt; <span class="kw">if</span> req.method == <span class="str">&quot;GET&quot;</span> || req.method == <span class="str">&quot;HEAD&quot;</span> { <span class="fn">f</span>(req) } <span class="kw">else</span> {
+<a class="ln" id="L167" href="#L167">167</a>            <a href="#L86"><span class="fn">failure</span></a>(<span class="num">405</span>)
+<a class="ln" id="L168" href="#L168">168</a>          }
+<a class="ln" id="L169" href="#L169">169</a>          <span class="ty">None</span> =&gt; <a href="#L86"><span class="fn">failure</span></a>(<span class="num">400</span>)
+<a class="ln" id="L170" href="#L170">170</a>        } }
+<a class="ln" id="L171" href="#L171">171</a>      <span class="kw">let</span> head := <span class="kw">match</span> request { <span class="ty">Some</span>(req) =&gt; req.method == <span class="str">&quot;HEAD&quot;</span>, <span class="ty">None</span> =&gt; <span class="kw">false</span> }
+<a class="ln" id="L172" href="#L172">172</a>      <span class="kw">match</span> <span class="kw">perform</span> <span class="fn">tcp_write</span>(
+<a class="ln" id="L173" href="#L173">173</a>        <span class="fn">Mutex::take</span>(parked),
+<a class="ln" id="L174" href="#L174">174</a>        <a href="#L58"><span class="fn">binary_wire</span></a>(response, head),
+<a class="ln" id="L175" href="#L175">175</a>        <span class="ty">Some</span>(<a href="#L114"><span class="fn">binary_deadline</span></a>())
+<a class="ln" id="L176" href="#L176">176</a>      ) {
+<a class="ln" id="L177" href="#L177">177</a>        <span class="ty">TcpWritten</span> { stream, result } =&gt; {
+<a class="ln" id="L178" href="#L178">178</a>          <span class="kw">match</span> result { <span class="ty">Ok</span>(_) =&gt; #(), <span class="ty">Err</span>(e) =&gt; <span class="kw">perform</span> <span class="fn">stderr</span>(<span class="fn">io_message</span>(e)) }
+<a class="ln" id="L179" href="#L179">179</a>          <span class="kw">match</span> <span class="kw">perform</span> <span class="fn">tcp_shutdown</span>(
+<a class="ln" id="L180" href="#L180">180</a>            <span class="fn">TcpStream::stopper</span>(&amp;stream),
+<a class="ln" id="L181" href="#L181">181</a>            <span class="ty">ShutdownWrite</span>
+<a class="ln" id="L182" href="#L182">182</a>          ) { <span class="ty">Ok</span>(_) =&gt; #(), <span class="ty">Err</span>(_) =&gt; #() }
+<a class="ln" id="L183" href="#L183">183</a>          <span class="kw">perform</span> <span class="fn">tcp_close</span>(stream)
+<a class="ln" id="L184" href="#L184">184</a>        }
+<a class="ln" id="L185" href="#L185">185</a>      }
+<a class="ln" id="L186" href="#L186">186</a>    }
+<a class="ln" id="L187" href="#L187">187</a>  }
+<a class="ln" id="L188" href="#L188">188</a>}
+<a class="ln" id="L189" href="#L189">189</a><span class="kw">fn</span> <span class="fn">accept_each</span>&lt;!h: <span class="ty">Host</span>&gt;(
+<a class="ln" id="L190" href="#L190">190</a>  <span class="var">l</span>: <span class="ty">TcpListener</span>,
+<a class="ln" id="L191" href="#L191">191</a>  <span class="var">f</span>: (<a href="#L28"><span class="ty">BinaryRequest</span></a>) -&gt; <a href="#L29"><span class="ty">BinaryResponse</span></a> ! h
+<a class="ln" id="L192" href="#L192">192</a>): <span class="ty">Unit</span> ! {<span class="ty">BinaryIo</span>, tcp_accept} ∪ h {
+<a class="ln" id="L193" href="#L193">193</a>  <span class="kw">match</span> <span class="kw">perform</span> <span class="fn">tcp_accept</span>(l, <span class="ty">None</span>) {
+<a class="ln" id="L194" href="#L194">194</a>    <span class="ty">TcpAccepted</span> { listener, got } =&gt; <span class="kw">match</span> got {
+<a class="ln" id="L195" href="#L195">195</a>      <span class="ty">Ok</span>(c) =&gt; {
+<a class="ln" id="L196" href="#L196">196</a>        <span class="kw">let</span> parked := <span class="kw">perform</span> <span class="fn">mutex_new</span>(listener)
+<a class="ln" id="L197" href="#L197">197</a>        <a href="#L158"><span class="fn">answer</span></a>(c, f)
+<a class="ln" id="L198" href="#L198">198</a>        <a href="#L189"><span class="fn">accept_each</span></a>(<span class="fn">Mutex::take</span>(parked), f)
+<a class="ln" id="L199" href="#L199">199</a>      }
+<a class="ln" id="L200" href="#L200">200</a>      <span class="com">// Accepting that is not permitted stops the server; any other failure (out of file</span>
+<a class="ln" id="L201" href="#L201">201</a>      <span class="com">// descriptors, say) is reported, and accepting goes on after a short wait.</span>
+<a class="ln" id="L202" href="#L202">202</a>      <span class="ty">Err</span>(<span class="ty">Denied</span>(m)) =&gt; <span class="kw">perform</span> <span class="fn">stderr</span>(<span class="fn">concat</span>(m, <span class="str">&quot;\n&quot;</span>))
+<a class="ln" id="L203" href="#L203">203</a>      <span class="ty">Err</span>(e) =&gt; {
+<a class="ln" id="L204" href="#L204">204</a>        <span class="kw">perform</span> <span class="fn">stderr</span>(<span class="fn">concat</span>(<span class="fn">io_message</span>(e), <span class="str">&quot;\n&quot;</span>))
+<a class="ln" id="L205" href="#L205">205</a>        <span class="kw">perform</span> <span class="fn">sleep</span>(<a href="../src/conn.taut.html#L335"><span class="fn">accept_retry_ms</span></a>())
+<a class="ln" id="L206" href="#L206">206</a>        <a href="#L189"><span class="fn">accept_each</span></a>(listener, f)
+<a class="ln" id="L207" href="#L207">207</a>      }
+<a class="ln" id="L208" href="#L208">208</a>    }
+<a class="ln" id="L209" href="#L209">209</a>  }
+<a class="ln" id="L210" href="#L210">210</a>}
+<a class="ln" id="L211" href="#L211">211</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">serve_binary</span>&lt;!h: <span class="ty">Host</span>&gt;(
+<a class="ln" id="L212" href="#L212">212</a>  <span class="var">address</span>: <span class="ty">Text</span>,
+<a class="ln" id="L213" href="#L213">213</a>  <span class="var">f</span>: (<a href="#L28"><span class="ty">BinaryRequest</span></a>) -&gt; <a href="#L29"><span class="ty">BinaryResponse</span></a> ! h
+<a class="ln" id="L214" href="#L214">214</a>): <span class="ty">Unit</span> ! {<span class="ty">BinaryIo</span>, stop, tcp_accept, tcp_listen} ∪ h {
+<a class="ln" id="L215" href="#L215">215</a>  <span class="kw">match</span> <span class="kw">perform</span> <span class="fn">tcp_listen</span>(address) {
+<a class="ln" id="L216" href="#L216">216</a>    <span class="ty">Err</span>(e) =&gt; <span class="kw">perform</span> <span class="fn">stop</span>(<span class="fn">io_message</span>(e))
+<a class="ln" id="L217" href="#L217">217</a>    <span class="ty">Ok</span>(listener) =&gt; {
+<a class="ln" id="L218" href="#L218">218</a>      <span class="kw">perform</span> <span class="fn">stderr</span>(<span class="fn">concat</span>(<span class="str">&quot;listening on &quot;</span>, <span class="fn">TcpListener::address</span>(&amp;listener)))
+<a class="ln" id="L219" href="#L219">219</a>      <a href="#L189"><span class="fn">accept_each</span></a>(listener, f)
+<a class="ln" id="L220" href="#L220">220</a>    }
+<a class="ln" id="L221" href="#L221">221</a>  }
+<a class="ln" id="L222" href="#L222">222</a>}
+<a class="ln" id="L223" href="#L223">223</a>
+<a class="ln" id="L224" href="#L224">224</a><span class="kw">fn</span> <span class="fn">slice_text</span>(
+<a class="ln" id="L225" href="#L225">225</a>  <span class="var">t</span>: <span class="ty">Text</span>,
+<a class="ln" id="L226" href="#L226">226</a>  <span class="var">a</span>: u64,
+<a class="ln" id="L227" href="#L227">227</a>  <span class="var">b</span>: u64
+<a class="ln" id="L228" href="#L228">228</a>): <span class="ty">Text</span> { <span class="kw">match</span> <span class="fn">Text::slice</span>(t, a, b) { <span class="ty">Some</span>(s) =&gt; s, <span class="ty">None</span> =&gt; <span class="str">&quot;&quot;</span> } }
+<a class="ln" id="L229" href="#L229">229</a><span class="kw">fn</span> <span class="fn">join_text</span>(
+<a class="ln" id="L230" href="#L230">230</a>  <span class="var">xs</span>: <span class="ty">List</span>(<span class="ty">Text</span>)
+<a class="ln" id="L231" href="#L231">231</a>): <span class="ty">Text</span> ! {div} { <span class="kw">match</span> xs { <span class="ty">Nil</span> =&gt; <span class="str">&quot;&quot;</span>, <span class="ty">Cons</span>(x, rest) =&gt; <span class="fn">concat</span>(x, <a href="#L229"><span class="fn">join_text</span></a>(rest)) } }
+</code></pre>
+</html>

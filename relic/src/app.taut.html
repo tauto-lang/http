@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>src/app.taut</title><style>:root{color-scheme:light dark;--bg:#fff;--fg:#1f2328;--mut:#6e7781;--kw:#cf222e;--str:#0a3069;--num:#0550ae;--com:#6e7781;--mac:#8250df;--ty:#953800;--fn:#6639ba;--var:#116329;--op:#0550ae;--link:#0969da;--sel:#fff8c5}@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--mut:#7d8590;--kw:#ff7b72;--str:#a5d6ff;--num:#79c0ff;--com:#8b949e;--mac:#d2a8ff;--ty:#ffa657;--fn:#d2a8ff;--var:#7ee787;--op:#79c0ff;--link:#58a6ff;--sel:#3a3000}}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,sans-serif}nav,main{padding:8px 16px}a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}pre{margin:0;padding:8px 0;font:13px/1.5 ui-monospace,monospace;overflow-x:auto}pre a{color:inherit}pre a[href^="#"],pre a[href*=".html"]{text-decoration:underline dotted}.ln{display:inline-block;width:5ch;margin-right:2ch;text-align:right;color:var(--mut);user-select:none;text-decoration:none!important}.ln:target{background:var(--sel)}.kw{color:var(--kw)}.str{color:var(--str)}.num{color:var(--num)}.com{color:var(--com)}.mac{color:var(--mac)}.ty{color:var(--ty)}.fn{color:var(--fn)}.var{color:var(--var)}.op{color:var(--op)}ul{list-style:none;padding-left:0}li li{padding-left:2ch}.kind{color:var(--mut)}</style>
+<nav><a href="../index.html">index</a> / src/app.taut</nav>
+<pre><code><a class="ln" id="L1" href="#L1">1</a><span class="kw">import</span> <span class="str">&quot;../../http/src/http.taut&quot;</span> { <span class="ty">HttpRequest</span> }
+<a class="ln" id="L2" href="#L2">2</a><span class="kw">import</span> <span class="str">&quot;../../http/src/status.taut&quot;</span> { <span class="ty">Status</span> }
+<a class="ln" id="L3" href="#L3">3</a><span class="kw">import</span> <span class="str">&quot;../../http/src/wire.taut&quot;</span> { parse_request }
+<a class="ln" id="L4" href="#L4">4</a><span class="kw">import</span> <span class="str">&quot;response.taut&quot;</span> { <span class="ty">Response</span>, is_head, response_text, text_response }
+<a class="ln" id="L5" href="#L5">5</a>
+<a class="ln" id="L6" href="#L6">6</a><span class="com">// One request in text, the response in text. A request that does not parse is</span>
+<a class="ln" id="L7" href="#L7">7</a><span class="com">// 400. A body that is not UTF-8 has no text form (`response_text` is empty);</span>
+<a class="ln" id="L8" href="#L8">8</a><span class="com">// the socket path writes those bytes unchanged.</span>
+<a class="ln" id="L9" href="#L9">9</a><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">render</span>&lt;<span class="ty">R</span>, !e&gt;(
+<a class="ln" id="L10" href="#L10">10</a>  <span class="var">raw</span>: <span class="ty">Text</span>,
+<a class="ln" id="L11" href="#L11">11</a>  <span class="var">pick</span>: (&amp;<span class="ty">HttpRequest</span>) -&gt; <span class="ty">R</span>,
+<a class="ln" id="L12" href="#L12">12</a>  <span class="var">answer</span>: (<span class="ty">HttpRequest</span>, <span class="ty">R</span>) -&gt; <a href="../src/response.taut.html#L11"><span class="ty">Response</span></a> ! e
+<a class="ln" id="L13" href="#L13">13</a>): <span class="ty">Text</span> ! e {
+<a class="ln" id="L14" href="#L14">14</a>  <span class="kw">match</span> <span class="fn">parse_request</span>(raw) {
+<a class="ln" id="L15" href="#L15">15</a>    <span class="ty">None</span> =&gt; <a href="../src/response.taut.html#L99"><span class="fn">response_text</span></a>(<span class="kw">false</span>, <a href="../src/response.taut.html#L17"><span class="fn">text_response</span></a>(<span class="fn">Status::bad_request</span>(), <span class="str">&quot;malformed request&quot;</span>))
+<a class="ln" id="L16" href="#L16">16</a>    <span class="ty">Some</span>(r) =&gt; {
+<a class="ln" id="L17" href="#L17">17</a>      <span class="kw">let</span> head := <a href="../src/response.taut.html#L106"><span class="fn">is_head</span></a>(r)
+<a class="ln" id="L18" href="#L18">18</a>      <span class="kw">let</span> route := <span class="fn">pick</span>(&amp;r)
+<a class="ln" id="L19" href="#L19">19</a>      <a href="../src/response.taut.html#L99"><span class="fn">response_text</span></a>(head, <span class="fn">answer</span>(r, route))
+<a class="ln" id="L20" href="#L20">20</a>    }
+<a class="ln" id="L21" href="#L21">21</a>  }
+<a class="ln" id="L22" href="#L22">22</a>}
+</code></pre>
+</html>
